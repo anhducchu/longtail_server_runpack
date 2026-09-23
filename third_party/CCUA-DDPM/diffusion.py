@@ -14,11 +14,6 @@ import string
 
 from clr import uncond_info_nce
 
-try:
-    from ipsvt_aux import IPSVTAuxiliary
-except ImportError:  # pragma: no cover - sampling/evaluation does not need IP-SVT
-    IPSVTAuxiliary = None
-
 
 class GaussianDiffusionSamplerDDIM(nn.Module):
     def __init__(self, model, beta_1, beta_T, T, img_size=32,
@@ -264,11 +259,6 @@ class GaussianDiffusionTrainer(nn.Module):
                  cbdm=False, cb_tau=1.0,
                  # CCUA hyperparameters
                  ccua_ucl=0.1, ccua_al=0.1,
-                 # IP-SVT hyperparameters (the native, old objective port)
-                 ipsvt=False, ipsvt_mode='full', ipsvt_K=4, ipsvt_s=0.05,
-                 ipsvt_delta=0.1, ipsvt_tau=1e-6, ipsvt_every=4,
-                 ipsvt_batch=16, ipsvt_lambda_aux=1.0, ipsvt_lambda_svt=1.0,
-                 ipsvt_use_checkpoint=True, seed=0,
                  ):
         super().__init__()
 
@@ -297,35 +287,6 @@ class GaussianDiffusionTrainer(nn.Module):
         # CCUA hyperparameters
         self.ccua_ucl = ccua_ucl
         self.ccua_al = ccua_al
-        self.ipsvt_aux = None
-        self.ipsvt_lambda_aux = float(ipsvt_lambda_aux)
-        self.ipsvt_lambda_svt = float(ipsvt_lambda_svt)
-        if ipsvt:
-            if IPSVTAuxiliary is None:
-                raise ImportError('native IP-SVT auxiliary module is unavailable')
-            if not hasattr(dataset, 'data') or not hasattr(dataset, 'targets'):
-                raise ValueError('native IP-SVT currently requires an in-memory dataset with data/targets')
-            self.ipsvt_aux = IPSVTAuxiliary(
-                images=dataset.data,
-                targets=dataset.targets,
-                num_class=num_class,
-                T=T,
-                beta_1=beta_1,
-                beta_T=beta_T,
-                K=ipsvt_K,
-                s=ipsvt_s,
-                delta=ipsvt_delta,
-                batch_size=ipsvt_batch,
-                lambda_svt=ipsvt_lambda_svt,
-                lambda_aux=ipsvt_lambda_aux,
-                every=ipsvt_every,
-                tau_r=ipsvt_tau,
-                device=torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
-                seed=seed,
-                use_checkpoint=ipsvt_use_checkpoint,
-                mode=ipsvt_mode,
-            )
-        self.last_ipsvt_stats = {}
 
         self.register_buffer(
             'betas', torch.linspace(beta_1, beta_T, T).double())
@@ -340,7 +301,7 @@ class GaussianDiffusionTrainer(nn.Module):
             'sigma_tsq', 1./alphas_bar-1.)
         self.register_buffer('sigma_t',torch.sqrt(self.sigma_tsq))
 
-    def forward(self, x_0, y_0, step=0):
+    def forward(self, x_0, y_0):
         """
         Algorithm 1.
         """
@@ -395,17 +356,7 @@ class GaussianDiffusionTrainer(nn.Module):
                 adaptw = adaptive_weight(t, tau=1.0)
                 loss_ccua_al = adaptw[:,None,None,None] * F.mse_loss(eps, eps_unc, reduction='none')
 
-        loss_ipsvt = torch.zeros((), device=x_t.device, dtype=eps.dtype)
-        self.last_ipsvt_stats = {}
-        if self.ipsvt_aux is not None:
-            result = self.ipsvt_aux(self.model, step)
-            if result is not None:
-                loss_twin, loss_svt, self.last_ipsvt_stats = result
-                loss_ipsvt = self.ipsvt_lambda_aux * (
-                    loss_twin + self.ipsvt_lambda_svt * loss_svt
-                )
-
-        return loss_ddpm, loss_cbdm, loss_ccua_ucl, loss_ccua_al, loss_ipsvt
+        return loss_ddpm, loss_cbdm, loss_ccua_ucl, loss_ccua_al
 
     def do_transfer_x0(self,x_t,cx_t,x_0,t,y,return_transfer_label=False,mode=None,x_ref=None):
         '''

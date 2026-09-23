@@ -57,7 +57,8 @@ native_train: &native_train
 native_eval: &native_eval
   checkpoint_step: 300000
   num_images: 50000
-  sample_batch_size: 64
+  sample_batch_size: 128
+  inception_batch_size: 64
   guidance_scale: 1.5
   sample_method: ddim
   ddim_skip_step: 10
@@ -65,6 +66,11 @@ native_eval: &native_eval
   sampler_family: ddim_100
   metric_protocol: native_cifar_v1
   paper_metrics: true
+  fast_metrics: true
+  feature_cache: true
+  legacy_prd_repeat: false
+  fast_metrics_file: fast_metrics_preview.json
+  fast_per_class_metrics_file: fast_per_class_fids.json
   metrics_file: metrics.native.json
   per_class_metrics_file: metrics.per_class.native.json
   longtail_groups: cm_three_way

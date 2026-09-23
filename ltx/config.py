@@ -79,7 +79,7 @@ def load_campaign(config_path: str | Path) -> LoadedCampaign:
     for stage in raw.get("stages", []):
         if not stage.get("enabled", True):
             continue
-        adapter = stage.get("adapter", shared.get("adapter", "coral"))
+        adapter = stage.get("adapter", shared.get("adapter", "ccua"))
         repo = repos.get(adapter, {})
         stage_train = deep_merge(shared_train if adapter == shared.get("adapter") else {}, stage.get("train", {}))
         stage_eval = deep_merge(shared_eval if adapter == shared.get("adapter") else {}, stage.get("eval", {}))

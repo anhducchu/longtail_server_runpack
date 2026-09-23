@@ -25,14 +25,14 @@ fi
 
 # CCUA-DDPM is the only active model/data/sampler backbone.  Metric assets are
 # also stored below this tree, so the active runner has no dependency on the
-# archived Coral/CBDM/OC/T2H source directories.
+# any retired standalone source directories.
 CCUA_ROOT="$REPOS_ROOT/CCUA-DDPM"
 if [[ ! -d "$CCUA_ROOT" || ! -f "$CCUA_ROOT/main.py" || ! -f "$CCUA_ROOT/model/model.py" ]]; then
   echo "[bootstrap] missing active CCUA-DDPM source at $CCUA_ROOT." >&2
   exit 2
 fi
-python patches/apply_ccua_imagenet_lt.py "$CCUA_ROOT"
-python patches/apply_ccua_sample_export.py "$CCUA_ROOT"
+python third_party/patches/apply_ccua_imagenet_lt.py "$CCUA_ROOT"
+python third_party/patches/apply_ccua_sample_export.py "$CCUA_ROOT"
 mkdir -p "$CCUA_ROOT/stats"
 echo "[bootstrap] CCUA-DDPM-only backbone ready; legacy source trees are not required"
 

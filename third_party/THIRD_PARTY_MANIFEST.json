@@ -1,198 +1,26 @@
 {
+  "schema_version": 1,
+  "created_at": "2026-09-24T00:00:00+07:00",
+  "copy_policy": "Source is vendored without .git metadata, datasets, generated metrics, checkpoints, logs, or caches.",
+  "baseline_objectives": [
+    "ddpm",
+    "cbdm",
+    "t2h",
+    "ccua"
+  ],
   "components": {
-    "cbdm": {
-      "commit": "513f7fffe7369343499611a8f68212a8b40f11a1",
-      "directory": "CBDM-pytorch",
-      "origin": "https://github.com/qym7/CBDM-pytorch",
-      "source_worktree_status": [
-        "M diffusion.py",
-        " M main.py",
-        "?? data/",
-        "?? esc_objective.py",
-        "?? model/anisotropic_partial_pooling.py",
-        "?? model/partial_pooling.py",
-        "?? tools/",
-        "?? train_app_gate.py",
-        "?? train_conditional_partial_pooling.py",
-        "?? train_partial_pooling.py"
-      ],
-      "vendored_python_sha256": {
-        "dataset.py": "9e4db381e1d1aceeb6139895332ceb80c0ef3161f6563b554ff51308c9b3ca7d",
-        "diffusion.py": "473aff936e5909c051b779d7cbc79e17b8f14c645e7ec81155c4a1459e0ee5d3",
-        "esc_objective.py": "7704d39ef7ac27fa4a01b6963da6a4c391bbee61a3dd63c787a327dee49305eb",
-        "main.py": "6aa9c5d2e179e4a37de874c4a8d0a4348af86ccb659c3e144e215502cbd97f36",
-        "model/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "model/anisotropic_partial_pooling.py": "8bd8586ba6cddec379ea1ef58558dad260d87230ed67cd70130f80f6a11ab755",
-        "model/model.py": "6ce5b0ba95160b21b66357c1daa22c1f4d7690f44b454ac28cbc28dfe9dea0ce",
-        "model/partial_pooling.py": "24951185f19fef8a220f76f618588a0433e8597924a4b746df712f1ddb2bd164",
-        "model/unet.py": "0a162494ee9b4a6be64b02a7959e64186a1e72054579fc1e72d41c3b5e74a5bc",
-        "model/unet_utils.py": "d9547fb22b421a16dc079cb82a9d98630100b5e1b2a710d343f4d3f90b8661f3",
-        "score/both.py": "b3fc2e349a1baf57f6ce0f43bc6255be488628234b4f3ad65389b61e2c5baeb0",
-        "score/fid.py": "802b69ca903026574a99b30fdf906d3721453cc5bb247197a93f43129cdee933",
-        "score/improved_prd.py": "596dd07dac55ec1b3882c6de7fcb389962a98d07ceec45e80be7fa5a61c6f22c",
-        "score/inception.py": "5767e46e70eccfa71835062c2afa30b044f52eb54f4bfee61d2fda5e3e783ec4",
-        "score/prd_score.py": "0aa1af7ffb82411c13d07dc1f945347ddc0ac8589eac403d51763daf61ad72b8",
-        "tools/cvrd_diagnostics.py": "c216b058dd43e01af07772aa532259366a5a849c81125f93dd520ffd964d6241",
-        "train_app_gate.py": "d8c4d6ce23491be840d38964d5f3930f4d10cdc7805dc44863ffa12ebf66f842",
-        "train_conditional_partial_pooling.py": "df79644a2cbc407cb20c5acf3090fe6c371bca9b2d805d1c139a406bd2ef561a",
-        "train_partial_pooling.py": "fc57323230745cf5e66373f7acf10e7e536a4a473386a754db366fea5b9bc669",
-        "utils/augmentation.py": "3fc7752e836ed718ff593bcc8d44fe7b7103d3b5cd81e4258f8f28454410da98"
-      }
-    },
     "ccua": {
       "commit": "baff9def6cfd553d4452d10eab0bac66ec2727aa",
       "directory": "CCUA-DDPM",
+      "origin": "https://github.com/C-Fun/Contrastive-Conditional-Unconditional-Alignment-for-Long-tailed-Diffusion-Model.git",
+      "subtree": "CCUA-DDPM/DDPM",
       "excluded_from_vendoring": [
         "utils/fld"
       ],
-      "origin": "https://github.com/C-Fun/Contrastive-Conditional-Unconditional-Alignment-for-Long-tailed-Diffusion-Model.git",
-      "source_worktree_status": [],
-      "subtree": "CCUA-DDPM/DDPM",
-      "vendored_python_sha256": {
-        "clr.py": "7a7503084d1addb9454181bf5174d414b9c9660d938990bf75b6c11181f2b7e0",
-        "dataset.py": "0e919d2c64b3590efa3fd6873571792bf1f1249cb95b1bf04c8b938e168ad7a5",
-        "diffusion.py": "3f955477136b46279d26a62313c0b8053c5290d6cf5af2318de34d3c0e8b9d9d",
-        "evaluate.py": "994f11d250bef52361c6b9a8953904b512d019b5b62cc5fce35e7918e95603d7",
-        "main.py": "fa6006f866efbfd76870a68297e28b840005727467d8c9716a004e8db4595de1",
-        "model/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "model/classifier.py": "cfbc52871e77b2c6be7e0f4b8c0376c45158b37a596490eedc274ef9779303f2",
-        "model/layers.py": "3391bf24b04c37a9e229d72ed00d5160ebd6ed32fd81f332928e861d781cac01",
-        "model/model.py": "85fc5df6c76b401c5f41b96992fa72183547c1e6ab7aa568d2716f8c3ba99db9",
-        "model/unet.py": "9aa0246af4e9370a94748577f53de1417c6ff41c9b59f95670aa7c2082c02902",
-        "model/unet_utils.py": "d305e0b0a61b482b3d247103c5c121965e50d960104c8e4f555b0eb1df474f13",
-        "score_new/both.py": "4b031e903fd2a530e87c53542999a0585a43e044c90bd5c9a8f8c41d190cfce3",
-        "score_new/fid.py": "802b69ca903026574a99b30fdf906d3721453cc5bb247197a93f43129cdee933",
-        "score_new/improved_prd.py": "596dd07dac55ec1b3882c6de7fcb389962a98d07ceec45e80be7fa5a61c6f22c",
-        "score_new/inception.py": "5767e46e70eccfa71835062c2afa30b044f52eb54f4bfee61d2fda5e3e783ec4",
-        "score_new/prd_score.py": "0aa1af7ffb82411c13d07dc1f945347ddc0ac8589eac403d51763daf61ad72b8",
-        "utils/category.py": "39779c632a5e42bc8b8b696020a62185604fc1f4443fe410c0a51a16340ac809",
-        "utils/fid_feats.py": "aebe473cf65676d5e3c27f4ea80a4e283555e98e6eae3da6bbbf2453920350eb",
-        "utils/fid_score.py": "566aa3a8549f67cde59b3280bd18a69e59259646b20013f1035f2c324459d8bd",
-        "utils/inception.py": "6ebb22743f4746c81a7668571393f02a1d31a3befc48e0f035e213caab04dc79"
-      }
-    },
-    "cm": {
-      "commit": "04262d7efc4130fda551fa1a1a22d8d5af636899",
-      "directory": "ImbDiff-CM",
-      "origin": "https://github.com/Feng-Hong/ImbDiff-CM",
-      "source_worktree_status": [
-        "M tools/train.py",
-        "?? configs/cifar10lt_ir100/"
-      ],
-      "vendored_python_sha256": {
-        "classification/imbdiff_classification/__init__.py": "5fedfe675a8b90c1a239d6252304c8026133b7ee77dd22bb8887a4673830b7ca",
-        "classification/imbdiff_classification/dataset.py": "367154cc2214d1d2122de2b86044af63f5faf64519e23d0767194eff74ff1388",
-        "classification/imbdiff_classification/losses.py": "1f461fa8a47dfae5657f807d433702ff874fe6b844e3d144b50ea77e99c74498",
-        "classification/imbdiff_classification/models/__init__.py": "7d0dbe193467a7249fbd2035b2558a01fabc7e7a471f7d30e39d7766bcf7ca87",
-        "classification/imbdiff_classification/models/resnet_s.py": "ae3b6f6d03dd69ea9d369ac4831b114661cb792f27eaa9937faa67d45e20040a",
-        "classification/imbdiff_classification/models/resnet_s_cm.py": "e34b2a26068944e81573a217d3238d853d63a41bb1b074bd1346cb4e40a281c9",
-        "classification/tools/train_classifier.py": "851affa3f448ac030cd85e38033bb69c1ecb5fda4fcbc8726e82a2afd7dd1b8e",
-        "imbdiff_cm/__init__.py": "cd6a96efaf17e9c5e5fd2b17cc192d57261c3acddff85f636cd4c9c81a379d11",
-        "imbdiff_cm/dataset.py": "c381ade2f75b54be6ba4fc4bfaf78fd4d30e9f24f86a4a643560b9635235b0ad",
-        "imbdiff_cm/diffusion.py": "170881bd31f872027ab8dc7f80d55d4864d7e561b707a0aa53b765c800d63e02",
-        "imbdiff_cm/diffusion_cm.py": "6791bf363c5ccbb15497261166117a3941e603b9842172693ad3e93033a06fad",
-        "imbdiff_cm/metrics.py": "f3fa9d27fd422a987a02d11c6f5a0ade0ad1ad0346f5c12ac1fa2057a8c0934b",
-        "imbdiff_cm/model/__init__.py": "03e997052e218964e01fc2f217c829c1396e9c88fdf6e91d98bedf1afd611943",
-        "imbdiff_cm/model/model.py": "d35b0a59e6f08b9952f9f5c61a46243492e56e5eeeba1586ca1fd22bb6003de4",
-        "imbdiff_cm/model/model_cm.py": "0c5cc746dd60936c04ba9bc48a68f68f157bc9dbac0fe469d98c998ff48ee9de",
-        "imbdiff_cm/score/__init__.py": "4e32c432d8245fb845601dc21ac8821f7dfc06533ef6ab45e6bf2df0e4cdb565",
-        "imbdiff_cm/score/inception.py": "194582ced3fc2b874c2912e40a45f1bfd1d9b002607fb410adce1dd5c1e84416",
-        "imbdiff_cm/utils/__init__.py": "04e555e02c4fa1e546559be86375271a1d36070c51e73315b23df50412a1f422",
-        "imbdiff_cm/utils/augmentation.py": "0a86636dba674c5b502a859a416ed854b685443c0cf1962ff23f7f7b3c379c8d",
-        "tools/compute_metrics.py": "c6070a6e815379d6474537c2a479c498fefa405a8ba65bb91a8377ba39786420",
-        "tools/extract_features.py": "388764b3860501d6be6c3bf70b85b109ade8d7293dd331c182e3d944d0506a3a",
-        "tools/sample_images.py": "2b85e1bdcac1068b2d2acee006178104f49a3b4976f3f6097e3effaddf5b130f",
-        "tools/train.py": "2cd8e8b7a957f8946cc5e9660cc3acddfb6a3e83d5cb16ff6d7d8c0b75977199"
-      }
-    },
-    "coral": {
-      "commit": "62c9dfad2da13f5be0f28975e5cd36727c1acc7a",
-      "directory": "coral-lt-diffusion",
-      "origin": "https://github.com/SankarLab/coral-lt-diffusion",
-      "source_worktree_status": [
-        "M main.py",
-        "?? loss_tracker.py"
-      ],
-      "vendored_python_sha256": {
-        "diffusion.py": "c3355389f718ed921a8c7b826012bbadd8dc1faff3017b0ac4df477dc7e270cc",
-        "loss_tracker.py": "89a706ab7952174f080d0e184c8ea49f28953ec034cd0811b33b9ac1ea0c9f12",
-        "main.py": "194d1862ffc9829d5408cdd7535b43ba0187cf793de3f3883fe1c0db0e20f171",
-        "model/model.py": "982ad183b72368eb282afda830fa7bcc3e50529b9359cc141745823e7cef67fb",
-        "model/unet.py": "0a162494ee9b4a6be64b02a7959e64186a1e72054579fc1e72d41c3b5e74a5bc",
-        "model/unet_utils.py": "d9547fb22b421a16dc079cb82a9d98630100b5e1b2a710d343f4d3f90b8661f3"
-      }
-    },
-    "igd": {
-      "commit": "46fa8af91f28eeaa992b2bde58aca88c3a907093",
-      "directory": "IGD-ML",
-      "origin": "https://github.com/pranoydas51/IGD-ML",
-      "source_worktree_status": [
-        "M main_igd.py"
-      ],
-      "vendored_python_sha256": {
-        "dataset.py": "9e4db381e1d1aceeb6139895332ceb80c0ef3161f6563b554ff51308c9b3ca7d",
-        "dataset_igd.py": "c6ced8692191e555eaeefbd0f3f47f52473df6e3487a37c7dc05e38b111f2c95",
-        "diffusion.py": "f8045a5e0b1d21a773f286c634ca8dedb04dc57b48662053feffb2c65ce805a7",
-        "diffusion_igd.py": "b3b4aff67c50c475d7a174d5efbb8514d31c15cb5f2af7a83d27ff9e449a5063",
-        "main.py": "6c51c5c5fa9ca2c29146aee5de78daad02a00470ad4415c77a0483a62df52e22",
-        "main_igd.py": "89a3bd276013adf95ba0b82395732b93fdbed8ee6b8a8a995760f45df2e079df",
-        "model/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "model/model.py": "6ce5b0ba95160b21b66357c1daa22c1f4d7690f44b454ac28cbc28dfe9dea0ce",
-        "model/model_igd.py": "6ce5b0ba95160b21b66357c1daa22c1f4d7690f44b454ac28cbc28dfe9dea0ce",
-        "model/unet.py": "0a162494ee9b4a6be64b02a7959e64186a1e72054579fc1e72d41c3b5e74a5bc",
-        "model/unet_utils.py": "d9547fb22b421a16dc079cb82a9d98630100b5e1b2a710d343f4d3f90b8661f3",
-        "score/both.py": "16f8def8df79de9c15d4a681d06783aba0e32a5982399a0fd02b8d3bf1f99860",
-        "score/fid.py": "802b69ca903026574a99b30fdf906d3721453cc5bb247197a93f43129cdee933",
-        "score/improved_prd.py": "596dd07dac55ec1b3882c6de7fcb389962a98d07ceec45e80be7fa5a61c6f22c",
-        "score/inception.py": "5767e46e70eccfa71835062c2afa30b044f52eb54f4bfee61d2fda5e3e783ec4",
-        "score/prd_score.py": "7414bee9f6c57775fd5a012cc6e2d5ef8bd72821c7f51ee398d50fcae4bce010",
-        "utils/augmentation.py": "3fc7752e836ed718ff593bcc8d44fe7b7103d3b5cd81e4258f8f28454410da98"
-      }
-    },
-    "t2h_unified": {
-      "commit": "ced184378e8dc784958b6e14fd687781babd836d",
-      "directory": "T2H-unified",
-      "origin": "https://github.com/MediaBrain-SJTU/OC_LT",
-      "source_worktree_status": [
-        "unified_main.py",
-        "unified_objectives.py",
-        "model/model_cm.py",
-        "ipsvt_aux.py",
-        "ltx_manifest_dataset.py",
-        "metrics.py",
-        "score/prd_score.py",
-        "score/inception.py"
-      ],
-      "host": "T2H/OC_LT with faithful objective ports"
-    },
-    "oc": {
-      "commit": "ced184378e8dc784958b6e14fd687781babd836d",
-      "directory": "OC_LT",
-      "origin": "https://github.com/MediaBrain-SJTU/OC_LT",
-      "source_worktree_status": [
-        "M main.py"
-      ],
-      "vendored_python_sha256": {
-        "dataset.py": "11bb0f04d8aaa59f8ced778d30b93c564ee369c8a06150284f3f6866fc90f4b5",
-        "ddpm_gen.py": "f5a5912b4808fd92046b577a365206d15f2c6c6c82b44d27eb88eeaf0b90d1fb",
-        "diffusion.py": "53985da8a10ca2e935cbab13721cfb59f0d16c6b01495d7c62961891a6a6ea00",
-        "main.py": "1ea1aace3e0ea106bdd7aa110b5524470bc077225a110473c9afbf3132fa524b",
-        "model/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "model/classifier.py": "ed4abe99ce748aa91306ed3413d5ff2f444d655255be5440a20abe69d2803640",
-        "model/layers.py": "ae5ae42e3d5f725cad46e23995c88e120ffad6ec5d05beed0986ecaa96334fba",
-        "model/model.py": "049abdb0d9fde6f803bd7fb60e85f661e39083b9019e1378394301daa6031b14",
-        "model/unet.py": "22061ccda206c6207c7e86d5d7c3c387c01d76e6da06360142be15521dd9554e",
-        "model/unet_utils.py": "d9547fb22b421a16dc079cb82a9d98630100b5e1b2a710d343f4d3f90b8661f3",
-        "score/both.py": "07220c2cb3413665767e597b951b0158c26b72349cc648e6494c55e4ab5c60f7",
-        "score/fid.py": "802b69ca903026574a99b30fdf906d3721453cc5bb247197a93f43129cdee933",
-        "score/inception.py": "76601412b79a74bb544d576d0478e17f4e3b492166ba7ea1cfaed0ba956a654b",
-        "utils/augmentation.py": "72eb644329ec0741b75e9b18ba68d56ee09c2de85294695d2d486143610c5a28",
-        "utils/misc.py": "f16d2e2e12522b8c3229b1d9f26e88ee9bd6a0b8f7b21c22230e902ef38b6033",
-        "utils/partial_label_gen.py": "e31ae0ccd8744e4c43e5861278978b81c4e8eed93d344933f348c57173be2743"
-      }
+      "operational_patches": [
+        "patches/apply_ccua_imagenet_lt.py",
+        "patches/apply_ccua_sample_export.py"
+      ]
     }
-  },
-  "copy_policy": "working trees copied without .git, data, stats, __pycache__, or literal download-cache directories named ...",
-  "created_at": "2026-07-27T05:51:36.230639+00:00",
-  "schema_version": 1
+  }
 }

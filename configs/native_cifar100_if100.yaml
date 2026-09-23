@@ -1,13 +1,11 @@
 # Main CIFAR-100-LT IF100 campaign.
 #
-# DDPM, CBDM, CCUA, and IP-SVT all use the same CCUA-DDPM U-Net, checkpoint,
-# optimizer, sampler, and metric host. IP-SVT is the minimal native port of the
-# previously evaluated objective; it changes no CCUA backbone code beyond its
-# auxiliary loss hook.
+# DDPM, CBDM, and CCUA use the same released CCUA-DDPM U-Net, dataset,
+# optimizer, sampler, and evaluator.
 campaign:
   name: ccua_cifar100_if100_v1
   protocol: native_cifar_v1
-  description: "CIFAR-100-LT IF100: CCUA-backed DDPM, CBDM, CCUA, and IP-SVT"
+  description: "CIFAR-100-LT IF100 baselines: DDPM, CBDM, and CCUA"
   server_config: configs/server.yaml
   paired_seeds: [0, 1, 2]
   default_priority: 100
@@ -15,7 +13,7 @@ campaign:
 
 native_contract:
   dataset: cifar100lt_if100
-  methods: [ddpm, cbdm, ccua, ipsvt]
+  methods: [ddpm, cbdm, ccua]
   seeds: [0, 1, 2]
   train_updates: 300000
   train_batch_size: 64
@@ -60,7 +58,8 @@ native_train: &native_train
 native_eval: &native_eval
   checkpoint_step: 300000
   num_images: 50000
-  sample_batch_size: 64
+  sample_batch_size: 128
+  inception_batch_size: 64
   guidance_scale: 1.5
   sample_method: ddim
   ddim_skip_step: 10
@@ -68,6 +67,11 @@ native_eval: &native_eval
   sampler_family: ddim_100
   metric_protocol: native_cifar_v1
   paper_metrics: true
+  fast_metrics: true
+  feature_cache: true
+  legacy_prd_repeat: false
+  fast_metrics_file: fast_metrics_preview.json
+  fast_per_class_metrics_file: fast_per_class_fids.json
   metrics_file: metrics.native.json
   per_class_metrics_file: metrics.per_class.native.json
   longtail_groups: cm_three_way
@@ -93,8 +97,7 @@ stages:
       - {name: ddpm, objective: ddpm}
       - {name: cbdm, objective: cbdm, cb_tau: 1.0}
       - {name: ccua, objective: ccua, ccua_al: 1.0, ccua_ucl: 1.0, brs: false}
-      - {name: ipsvt, objective: ipsvt, ipsvt_mode: full, ipsvt_K: 4, ipsvt_s: 0.05, ipsvt_delta: 0.1, ipsvt_tau: 1.0e-6, ipsvt_every: 4, ipsvt_batch: 16, ipsvt_lambda_aux: 1.0, ipsvt_lambda_svt: 1.0}
     seeds: [0, 1, 2]
-    tags: [ccua-backbone, native-cifar-v1, cifar100lt, if100, baseline, candidate]
+    tags: [ccua-backbone, native-cifar-v1, cifar100lt, if100, baseline]
 
 aggregation: {enabled: false}

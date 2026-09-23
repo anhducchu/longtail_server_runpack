@@ -1,6 +1,7 @@
 import copy
 import json
 import os
+import tempfile
 import warnings
 from absl import app, flags
 from tqdm import trange
@@ -24,6 +25,37 @@ from model.classifier import HalveUNetClassifier
 
 from dataset import ImbalanceCIFAR100, ImbalanceCIFAR10, ImbalanceImageNet, ImbalanceTinyImageNet, ImageNet, ImageNetLTManifest, PlacesLT, PlacesLD, SubsetPerLabel
 # from score_new.both import get_inception_and_fid_score as get_inception_and_fid_score_new
+
+
+def atomic_torch_save(payload, destination):
+    """Atomically replace a checkpoint after its bytes reach disk."""
+    destination = os.fspath(destination)
+    parent = os.path.dirname(destination) or "."
+    os.makedirs(parent, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(
+        prefix=f".{os.path.basename(destination)}.",
+        suffix=".tmp",
+        dir=parent,
+    )
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            torch.save(payload, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, destination)
+        try:
+            directory_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError:
+            pass
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
 
 
 
@@ -55,7 +87,8 @@ flags.DEFINE_float('grad_clip', 1., help='gradient norm clipping')
 flags.DEFINE_integer('total_steps', 300001, help='total training steps')
 flags.DEFINE_integer('img_size', 32, help='image size')
 flags.DEFINE_integer('warmup', 5000, help='learning rate warmup')
-flags.DEFINE_integer('batch_size', 64, help='batch size')
+flags.DEFINE_integer('batch_size', 64, help='training batch size')
+flags.DEFINE_integer('sample_batch_size', 0, help='sampling batch size; 0 reuses batch_size')
 flags.DEFINE_integer('num_workers', 4, help='workers of Dataloader')
 flags.DEFINE_float('ema_decay', 0.9999, help='ema decay rate')
 flags.DEFINE_bool('parallel', False, help='multi gpu training')
@@ -118,24 +151,6 @@ flags.DEFINE_float('ccua_al', 0.0, help='ccua al loss')
 flags.DEFINE_float('ccua_ucl', 0.0, help='ccua ucl loss')
 flags.DEFINE_bool('brs', False, help='whether to use batch resample')
 flags.DEFINE_float('brs_factor', 0.1, help='imb_factor after batch resample')
-
-# IP-SVT: the previously evaluated exact-target Twin + angular Gram-SVT
-# objective, ported onto this native CCUA U-Net.  Keeping these flags here
-# makes the method a normal CCUA checkpoint/optimizer lineage rather than a
-# second host with a different model implementation.
-flags.DEFINE_bool('ipsvt', False, help='train the native IP-SVT auxiliary branch')
-flags.DEFINE_enum('ipsvt_mode', 'full', ['full', 'twin', 'clean'], help='IP-SVT attribution mode')
-flags.DEFINE_integer('ipsvt_K', 4, help='number of stochastic response probes')
-flags.DEFINE_float('ipsvt_s', 0.05, help='relative class-embedding perturbation radius')
-flags.DEFINE_float('ipsvt_delta', 0.1, help='correlated-noise probe coefficient')
-flags.DEFINE_float('ipsvt_tau', 1e-6, help='response norm validity threshold')
-flags.DEFINE_integer('ipsvt_every', 4, help='run the class-uniform IP-SVT branch every N updates')
-flags.DEFINE_integer('ipsvt_batch', 16, help='class-uniform IP-SVT auxiliary batch size')
-flags.DEFINE_float('ipsvt_lambda_aux', 1.0, help='IP-SVT auxiliary loss weight')
-flags.DEFINE_float('ipsvt_lambda_svt', 1.0, help='IP-SVT Gram loss weight inside the auxiliary loss')
-flags.DEFINE_bool('ipsvt_use_checkpoint', True, help='gradient-checkpoint native IP-SVT forwards')
-
-
 
 device = torch.device('cuda:0')
 
@@ -293,13 +308,6 @@ def train():
         transfer_mode=FLAGS.transfer_mode,label_weight_tr = weight_power_matrix,
         cbdm=FLAGS.cbdm, cb_tau=FLAGS.cb_tau,
         ccua_ucl=FLAGS.ccua_ucl, ccua_al=FLAGS.ccua_al,
-        ipsvt=FLAGS.ipsvt, ipsvt_mode=FLAGS.ipsvt_mode,
-        ipsvt_K=FLAGS.ipsvt_K, ipsvt_s=FLAGS.ipsvt_s,
-        ipsvt_delta=FLAGS.ipsvt_delta, ipsvt_tau=FLAGS.ipsvt_tau,
-        ipsvt_every=FLAGS.ipsvt_every, ipsvt_batch=FLAGS.ipsvt_batch,
-        ipsvt_lambda_aux=FLAGS.ipsvt_lambda_aux,
-        ipsvt_lambda_svt=FLAGS.ipsvt_lambda_svt,
-        ipsvt_use_checkpoint=FLAGS.ipsvt_use_checkpoint, seed=FLAGS.seed,
         ).to(device)
     net_sampler = GaussianDiffusionSampler(
         net_model, FLAGS.beta_1, FLAGS.beta_T, FLAGS.T, FLAGS.num_class, FLAGS.img_size, FLAGS.var_type).to(device)
@@ -364,7 +372,7 @@ def train():
 
             x_0 = x_0.to(device)
             y_0 = y_0.to(device)
-            loss_ddpm, loss_cbdm, loss_ccua_ucl, loss_ccua_al, loss_ipsvt = trainer(x_0, y_0, step=step)
+            loss_ddpm, loss_cbdm, loss_ccua_ucl, loss_ccua_al = trainer(x_0, y_0)
             loss_ddpm = loss_ddpm.mean()
             loss_cbdm = loss_cbdm.mean()
             loss_ccua_ucl = loss_ccua_ucl.mean()
@@ -373,8 +381,7 @@ def train():
             loss = loss_ddpm \
                    + loss_cbdm \
                    + loss_ccua_ucl * FLAGS.ccua_ucl \
-                   + loss_ccua_al * FLAGS.ccua_al \
-                   + loss_ipsvt
+                   + loss_ccua_al * FLAGS.ccua_al
             loss.backward()
 
             torch.nn.utils.clip_grad_norm_(
@@ -389,18 +396,14 @@ def train():
             writer.add_scalar('loss_cbdm', loss_cbdm, step)
             writer.add_scalar('loss_ccua_ucl', loss_ccua_ucl, step)
             writer.add_scalar('loss_ccua_al', loss_ccua_al, step)
-            writer.add_scalar('loss_ipsvt', loss_ipsvt, step)
-            for name, value in getattr(trainer, 'last_ipsvt_stats', {}).items():
-                writer.add_scalar(name, value, step)
             pbar.set_postfix(loss='%.5f' % loss,
                              loss_ddpm='%.5f' % loss_ddpm,
                              loss_cbdm='%.5f' % loss_cbdm,
                              loss_ccua_ucl='%.5f' % loss_ccua_ucl,
-                             loss_ccua_al='%.5f' % loss_ccua_al,
-                             loss_ipsvt='%.5f' % loss_ipsvt,)
+                             loss_ccua_al='%.5f' % loss_ccua_al,)
 
             # sample
-            if step != 0 and step % FLAGS.sample_step == 0:
+            if FLAGS.sample_step > 0 and step != 0 and step % FLAGS.sample_step == 0:
                 net_model.eval()
                 with torch.no_grad():
                     x_0, _  = ema_sampler(fixed_x_T)
@@ -421,7 +424,10 @@ def train():
                     'step': step + FLAGS.ckpt_step,
                     'fixed_x_T': fixed_x_T,
                 }
-                torch.save(ckpt, os.path.join(FLAGS.logdir, 'ckpt_{}.pt'.format(step + FLAGS.ckpt_step)))
+                atomic_torch_save(
+                    ckpt,
+                    os.path.join(FLAGS.logdir, 'ckpt_{}.pt'.format(step + FLAGS.ckpt_step)),
+                )
 
             # # evaluate
             # if FLAGS.eval_step > 0 and step % FLAGS.eval_step == 0:
@@ -457,24 +463,30 @@ def sample_ddim(sampler, model, sampled):
     print('sampled: ', sampled)
     if not sampled:
         model.eval()
-        with torch.no_grad():
+        sample_batch_size = int(FLAGS.sample_batch_size or FLAGS.batch_size)
+        if sample_batch_size <= 0:
+            raise ValueError('sample_batch_size must be positive')
+        with torch.inference_mode():
             images = []
             labels = []
             desc = 'generating images'
-            for i in trange(0, FLAGS.num_images, FLAGS.batch_size, desc=desc):
-                batch_size = min(FLAGS.batch_size, FLAGS.num_images - i)
-                x_T = torch.randn((batch_size, 3, FLAGS.img_size, FLAGS.img_size))
+            for i in trange(0, FLAGS.num_images, sample_batch_size, desc=desc):
+                batch_size = min(sample_batch_size, FLAGS.num_images - i)
+                x_T = torch.randn(
+                    (batch_size, 3, FLAGS.img_size, FLAGS.img_size),
+                    device=device,
+                )
                 if FLAGS.uniform_labels:
                     batch_labels = classes[torch.arange(i, i + batch_size) % len(classes)].to(device)
                 else:
                     batch_idx = torch.randint(len(classes), size=(x_T.shape[0],))
                     batch_labels = classes[batch_idx].to(device)
                 print(f'label len: {batch_labels.shape[0]}, label range: {batch_labels.min()} ~ {batch_labels.max()}')
-                batch_images = sampler(x_T.to(device), y=batch_labels.to(device),
+                batch_images = sampler(x_T, y=batch_labels,
                                        method=FLAGS.sample_method,
                                        skip=FLAGS.ddim_skip_step,
                                        return_timestep_status=False)
-                images.append((batch_images + 1) / 2)
+                images.append(((batch_images + 1) / 2).cpu())
                 if FLAGS.sample_method!='uncond' and batch_labels is not None:
                     labels.append(batch_labels)
             images = torch.cat(images, dim=0).cpu().numpy()

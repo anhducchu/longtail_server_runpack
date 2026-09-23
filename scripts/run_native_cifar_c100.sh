@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Main CCUA-backbone CIFAR-100-LT IF100 campaign: DDPM/CBDM/CCUA/IP-SVT x 3 seeds.
+# Main CCUA-backbone CIFAR-100-LT IF100 campaign: DDPM/CBDM/CCUA x 3 seeds.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -49,10 +49,9 @@ python tools/prepare_cifar_metric_assets.py \
   --datasets cifar100
 
 # The main baseline now uses the CCUA-DDPM U-Net for all four objectives.
-# The old completed DDPM checkpoint came from Coral and has extra projection
-# heads, so it is intentionally kept as an audit artifact rather than loaded
-# into this campaign. Each CCUA-DDPM baseline starts/resumes only in its own
-# native run directory.
+# Each CCUA-DDPM baseline starts or resumes only in its own native run
+# directory. Checkpoints from retired hosts remain audit artifacts and are not
+# loaded into this campaign.
 
 RUN_ARGS=(--config configs/native_cifar100_if100.yaml)
 [[ -n "${LTX_GPU_IDS:-}" ]] && RUN_ARGS+=(--gpus "$LTX_GPU_IDS")

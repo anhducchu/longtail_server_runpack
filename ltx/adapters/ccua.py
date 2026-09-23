@@ -24,12 +24,8 @@ class CCUAAdapter(Adapter):
     manifest loader; this is important because the released ImageFolder path
     would otherwise train on all of ImageNet instead of the published LT split.
 
-    The same adapter can express the plain DDPM, CBDM, T2H transfer, native
-    CCUA, and old IP-SVT objectives by setting the explicit ``objective`` field
-    while retaining the CCUA U-Net/data/checkpoint plumbing. Objective
-    switches are translated to the flags understood by this repository, so a
-    native campaign cannot accidentally send the Coral-family ``--cb``/``--tau``
-    flags to CCUA.
+    The same adapter expresses the released DDPM, CBDM, T2H and CCUA baselines
+    while retaining one U-Net, dataset, checkpoint, sampler and evaluator.
 
     Sampling goes through ``main.py --sample`` rather than upstream
     ``evaluate.py``: the latter imports CCUA's own FLD/CLIP/DINOv2 metric stack
@@ -39,6 +35,7 @@ class CCUAAdapter(Adapter):
     """
 
     name = "ccua"
+    DEFAULT_CHECKPOINT_INTERVAL_STEPS = 25_000
 
     @staticmethod
     def latest(run_dir: Path, target: int) -> int | None:
@@ -88,9 +85,9 @@ class CCUAAdapter(Adapter):
         # method in the campaign YAML, but forced to zero for sibling
         # objectives so their objective identity cannot drift with defaults.
         objective = str(method_cfg.get("objective", task.method)).lower()
-        if objective not in {"ddpm", "cbdm", "t2h", "ccua", "ipsvt"}:
+        if objective not in {"ddpm", "cbdm", "t2h", "ccua"}:
             raise ValueError(
-                "CCUA U-Net adapter supports objective=ddpm, cbdm, t2h, ccua, or ipsvt, "
+                "CCUA U-Net adapter supports only objective=ddpm, cbdm, t2h, or ccua; "
                 f"got {objective!r}"
             )
         if objective == "cbdm":
@@ -106,37 +103,33 @@ class CCUAAdapter(Adapter):
                 "--nocbdm", "--ccua_al=0.0", "--ccua_ucl=0.0",
             ]
         elif objective == "t2h":
-            # CCUA-DDPM vendors the same T2H transfer target used by the
-            # original OC_LT/T2H trainer. Keep it as a separate objective,
-            # but run it through this campaign's single U-Net/data host.
+            # Keep T2H as a separate objective while running it through this
+            # campaign's single U-Net/data host.
             objective_flags = [
                 "--transfer_x0", "--transfer_mode=t2h",
                 "--nocbdm", "--ccua_al=0.0", "--ccua_ucl=0.0",
             ]
-        elif objective == "ccua":
+        else:  # objective == "ccua"
             ccua_al = method_cfg.get("ccua_al", 1.0)
             ccua_ucl = method_cfg.get("ccua_ucl", 1.0)
             objective_flags = [
                 "--nocbdm", f"--ccua_al={ccua_al}", f"--ccua_ucl={ccua_ucl}",
             ]
-        else:  # objective == "ipsvt"
-            ipsvt_mode = str(method_cfg.get("ipsvt_mode", "full"))
-            ipsvt_k = int(method_cfg.get("ipsvt_K", 4))
-            if ipsvt_mode not in {"full", "twin", "clean"}:
-                raise ValueError(f"native IP-SVT mode must be full, twin, or clean; got {ipsvt_mode!r}")
-            if ipsvt_k < 2:
-                raise ValueError("native old Gram-SVT requires ipsvt_K >= 2")
-            objective_flags = [
-                "--nocbdm", "--ccua_al=0.0", "--ccua_ucl=0.0", "--ipsvt",
-                f"--ipsvt_mode={ipsvt_mode}", f"--ipsvt_K={ipsvt_k}",
-                f"--ipsvt_s={method_cfg.get('ipsvt_s', 0.05)}",
-                f"--ipsvt_delta={method_cfg.get('ipsvt_delta', 0.1)}",
-                f"--ipsvt_tau={method_cfg.get('ipsvt_tau', 1e-6)}",
-                f"--ipsvt_every={method_cfg.get('ipsvt_every', 4)}",
-                f"--ipsvt_batch={method_cfg.get('ipsvt_batch', 16)}",
-                f"--ipsvt_lambda_aux={method_cfg.get('ipsvt_lambda_aux', 1.0)}",
-                f"--ipsvt_lambda_svt={method_cfg.get('ipsvt_lambda_svt', 1.0)}",
-            ]
+
+        # Bound work lost to a SIGKILL while preserving a campaign's smaller
+        # explicit interval. A configured value of zero still disables saves.
+        configured_save_step = int(train.get("save_step", 50000))
+        checkpoint_interval = int(
+            task.retry.get(
+                "checkpoint_interval_steps",
+                self.DEFAULT_CHECKPOINT_INTERVAL_STEPS,
+            )
+            or 0
+        )
+        if configured_save_step > 0 and checkpoint_interval > 0:
+            save_step = min(configured_save_step, checkpoint_interval)
+        else:
+            save_step = configured_save_step
 
         train_cmd = [
             py, "main.py", "--train",
@@ -153,7 +146,7 @@ class CCUAAdapter(Adapter):
             f"--dropout={train.get('dropout', 0.1)}",
             f"--grad_clip={train.get('grad_clip', 1.0)}",
             f"--warmup={train.get('warmup', 5000)}",
-            f"--save_step={train.get('save_step', 50000)}",
+            f"--save_step={save_step}",
             f"--sample_step={train.get('sample_step', 100000)}",
             f"--num_workers={resolve_num_workers(train, 4)}",
             "--conditional", "--cfg",
@@ -228,7 +221,8 @@ class CCUAAdapter(Adapter):
                 f"--ckpt_step={target}", f"--num_class={num_class}",
                 f"--img_size={img_size}",
                 f"--num_images={evaluate.get('num_images', 50000)}",
-                f"--batch_size={evaluate.get('sample_batch_size', batch)}",
+                f"--batch_size={batch}",
+                f"--sample_batch_size={evaluate.get('sample_batch_size', batch)}",
                 f"--sample_method={evaluate.get('sample_method', 'ddpm')}",
                 f"--ddim_skip_step={evaluate.get('ddim_skip_step', 1)}",
                 f"--omega={omega}", f"--T={train.get('T', 1000)}",
@@ -281,20 +275,67 @@ class CCUAAdapter(Adapter):
                     skip_if_exists=[run_dir / metrics_file],
                 ))
                 continue
-            metric_cmd = [
+            metric_base = [
                 py, str(self.root / "tools" / "evaluate_ccua.py"),
                 "--repo", str(repo),
                 "--data-type", str(task.dataset["data_type"]),
                 "--samples", str(samples), "--labels", str(labels),
                 "--metrics-root", str(metrics_root),
-                "--output", str(run_dir / metrics_file),
                 "--inception-batch-size", str(inception_batch),
             ]
+            feature_cache = run_dir / f"inception_features{suffix}.npz"
+            if evaluate.get("feature_cache", True):
+                metric_base += ["--generated-features-cache", str(feature_cache)]
+
             if evaluate.get("kid", False):
-                metric_cmd += ["--kid", "--kid-subsets", str(evaluate.get("kid_subsets", 100)),
-                               "--kid-subset-size", str(evaluate.get("kid_subset_size", 1000)),
-                               "--kid-seed", str(evaluate.get("kid_seed", 2026))]
+                kid_args = ["--kid", "--kid-subsets", str(evaluate.get("kid_subsets", 100)),
+                            "--kid-subset-size", str(evaluate.get("kid_subset_size", 1000)),
+                            "--kid-seed", str(evaluate.get("kid_seed", 2026))]
+            else:
+                kid_args = []
             per_class_file = str(evaluate.get("per_class_metrics_file", "")).strip()
+
+            # A non-canonical preview gives fast feedback without being
+            # mistaken for the complete paper metric artifact.
+            if evaluate.get("fast_metrics", False):
+                fast_file = str(evaluate.get("fast_metrics_file", "fast_metrics_preview.json"))
+                if not single:
+                    fast_file = fast_file.replace(".json", f"{suffix}.json")
+                fast_output = run_dir / fast_file
+                fast_cmd = metric_base + [
+                    "--mode", "gpu_fast",
+                    "--output", str(fast_output),
+                    "--kid-subsets", str(evaluate.get("kid_subsets", 100)),
+                    "--kid-subset-size", str(evaluate.get("kid_subset_size", 1000)),
+                    "--kid-seed", str(evaluate.get("kid_seed", 2026)),
+                ]
+                fast_outputs = [fast_output]
+                if per_class_file and single:
+                    fast_per_class_file = str(
+                        evaluate.get("fast_per_class_metrics_file", "fast_per_class_fids.json")
+                    )
+                    fast_per_class_output = run_dir / fast_per_class_file
+                    fast_cmd += [
+                        "--per-class-output", str(fast_per_class_output),
+                        "--longtail-groups", str(evaluate.get("longtail_groups", "none")),
+                    ]
+                    fast_outputs.append(fast_per_class_output)
+                phases.append(Phase(
+                    f"fast_metrics{suffix}",
+                    fast_cmd,
+                    self.root,
+                    skip_if_exists=fast_outputs,
+                ))
+
+            if evaluate.get("quick_metrics_only", False):
+                continue
+
+            metric_cmd = metric_base + [
+                "--mode", "detailed",
+                "--output", str(run_dir / metrics_file),
+            ] + kid_args
+            if evaluate.get("legacy_prd_repeat", False):
+                metric_cmd.append("--legacy-prd-repeat")
             if per_class_file and single:
                 metric_cmd += ["--per-class-output", str(run_dir / per_class_file),
                                "--longtail-groups", str(evaluate.get("longtail_groups", "none"))]

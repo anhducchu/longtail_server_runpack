@@ -14,7 +14,6 @@ dependencies = [
   "wandb-workspaces>=0.1.9",
   "tensorboard>=2.14",
   "numpy>=1.24",
-  "jsonschema>=4.20",
 ]
 
 [project.scripts]
@@ -22,3 +21,6 @@ ltx = "ltx.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["ltx*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

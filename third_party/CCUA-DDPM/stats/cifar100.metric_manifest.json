@@ -1,0 +1,22 @@
+{
+  "created_at": "2026-09-01T16:12:28.043727+00:00",
+  "dataset": "cifar100",
+  "feature_extractor": "pinned CCUA-DDPM InceptionV3 (2048-d)",
+  "feature_file": "cifar100_feats.npy",
+  "feature_sha256": "57969c751ac0d0239a7589a1bb103b896d8f08ce25c6fbfb8b37a03afb93855b",
+  "fid_file": "cifar100.train.npz",
+  "fid_sha256": "8d9ba62a946dbd09e8ae9614bc6a37f8b5d1819d141ac2ba4c3b10934fca83c8",
+  "improved_prd_feature_extractor": "torchvision VGG16 ImageNet fc2 (4096-d), source-compatible resize to 224",
+  "improved_prd_k": 3,
+  "labels_file": "cifar100_labels.npy",
+  "labels_sha256": "233cdd4afc94cd00f3ddec6f8640168bf76a6872168cf6c5a9990ac9f144be3b",
+  "metric_protocol": "shared FID and PRD feature cache",
+  "num_images": 50000,
+  "repository": "/home/nvidia-lab/ai4life/annd/respi/longtail_server_runpack/third_party/CCUA-DDPM",
+  "repository_commit": "baff9def6cfd553d4452d10eab0bac66ec2727aa",
+  "split": "balanced CIFAR training (50,000 images, class-uniform source)",
+  "vgg_feature_file": "cifar100_vgg16_fc2.npy",
+  "vgg_feature_sha256": "6da5d73bd550fca9848f54559aca44533c3c59f0ecc2853f783b89cf40a99a64",
+  "vgg_radii_file": "cifar100_vgg16_fc2_k3_radii.npy",
+  "vgg_radii_sha256": "a0d1ae11fd06e9b039a72d2ac7fff6041e19b50f47cd24491f9cb2a61f011c8b"
+}
