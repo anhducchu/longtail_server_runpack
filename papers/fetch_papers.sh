@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fetch the source papers for the six methods in the unified CIFAR-LT table.
+# Fetch the source papers for the four supported baseline objectives.
 #
 # PDFs are not committed (see papers/.gitignore): they are third-party
 # copyrighted works and one is ~23 MB. This script re-fetches them on demand
@@ -33,10 +33,8 @@ fetch() {
   fi
 }
 
-# OpenReview serves its PDFs behind a bot challenge, so T2H and CM cannot be
-# fetched non-interactively. Neither is on arXiv and Semantic Scholar lists no
-# open-access mirror. Copy from a local path if one is configured, otherwise
-# print the URL for a manual (browser) download.
+# OpenReview serves the T2H PDF behind a bot challenge. Copy from a local path
+# if one is configured, otherwise print the URL for a manual browser download.
 local_or_manual() {
   local out="$1" src="$2" url="$3"
   if [[ -s "$out" ]]; then
@@ -59,22 +57,13 @@ status=0
 fetch ddpm-neurips2020-ho.pdf \
   "https://arxiv.org/pdf/2006.11239" "arXiv:2006.11239" || status=1
 
-# CBDM — CVPR 2023. Also the codebase T2H and IGD-ML are derived from.
+# CBDM — CVPR 2023.
 fetch cbdm-cvpr2023-qin.pdf \
   "https://arxiv.org/pdf/2305.00562" "arXiv:2305.00562" || status=1
 
 # T2H — ICLR 2024 poster. Not on arXiv; OpenReview is the source of record.
 local_or_manual t2h-iclr2024-zhang.pdf \
   "${LTX_PAPER_T2H_SRC:-}" "https://openreview.net/forum?id=NW2s5XXwXU" || status=1
-
-# CM (ImbDiff-CM) — ICLR 2026 Oral. Not on arXiv.
-local_or_manual cm-iclr2026-hong.pdf \
-  "${LTX_PAPER_CM_SRC:-}" "https://openreview.net/forum?id=wSGle6ag5I" || status=1
-
-# CORAL — NeurIPS 2025. The old vendored copy is retained in the cleanup
-# archive; this command fetches the arXiv version into papers/.
-fetch coral-neurips2025-rodriguez.pdf \
-  "https://arxiv.org/pdf/2506.15933" "arXiv:2506.15933" || status=1
 
 # CCUA — arXiv preprint (v3, Jun 2026). The repository ships a U-Net (DDPM) and
 # a DiT/SiT pipeline; only the U-Net one is in this table.
@@ -83,7 +72,7 @@ fetch ccua-arxiv2507.09052-chen.pdf \
 
 echo
 if [[ "$status" -eq 0 ]]; then
-  echo "[papers] all 6 papers present."
+  echo "[papers] all 4 baseline papers present."
 else
   echo "[papers] some downloads failed; see warnings above." >&2
 fi
