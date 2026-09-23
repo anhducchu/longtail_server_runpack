@@ -1,4 +1,0 @@
-logs
-stats/cifar10_feats.npy
-stats/cifar100_feats.npy
-**/__pycache__/

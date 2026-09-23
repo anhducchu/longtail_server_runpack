@@ -1,1 +1,0 @@
-deterministic seed + frozen manifest + replacement WeightedRandomSampler + sample_only; no model/loss change
