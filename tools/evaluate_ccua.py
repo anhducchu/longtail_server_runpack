@@ -8,7 +8,13 @@ the exact VGG16 50k-by-50k improved-PRD and every per-class FID. The default
 headline snapshot before starting those optional expensive calculations.
 ``--mode quick`` accepts a smaller class-uniform smoke sample and reports only
 the common fast metrics; its values are not for paper reporting or direct
-comparison with the 50k protocol.
+comparison with the 50k protocol. ``--mode gpu_fast`` is a deliberately
+non-canonical 50k preview: it uses CUDA for FID/KID and per-class/split FID,
+omits the CPU Inception PRD and VGG improved-PRD columns, and is never used by
+the paper report. ``--mode improved_pr`` computes only the canonical VGG16
+improved Precision/Recall pair, reusing the balanced reference features and
+radii; it intentionally skips Inception PRD/F8/F1/8 and all other metrics.
+All modes can reuse the generated Inception feature cache.
 """
 from __future__ import annotations
 
@@ -24,7 +30,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from ltx.paper_metrics import improved_prd_vgg16_k3, polynomial_mmd_kid
+from ltx.paper_metrics import improved_prd_vgg16_k3, polynomial_mmd_kid, polynomial_mmd_kid_gpu
 
 
 _IS_SPLITS = 10
@@ -120,7 +126,84 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
         raise
 
 
-def _inception_features_and_is(repo: Path, images: np.ndarray, batch_size: int) -> tuple[np.ndarray, tuple[float, float]]:
+def _feature_cache_signature(samples: Path) -> dict:
+    """Return a cheap identity for a generated sample artifact.
+
+    The cache is intentionally tied to path, byte size, and mtime.  A full
+    SHA-256 over a 50k image array would make a fast re-evaluation needlessly
+    expensive; the sampler already writes a provenance sidecar for the
+    checkpoint/protocol identity.
+    """
+    resolved = Path(samples).resolve()
+    stat = resolved.stat()
+    return {
+        "sample_path": str(resolved),
+        "sample_size": int(stat.st_size),
+        "sample_mtime_ns": int(stat.st_mtime_ns),
+    }
+
+
+def _load_feature_cache(path: Path, samples: Path, num_images: int) -> tuple[np.ndarray, tuple[float, float]] | None:
+    """Load a validated generated Inception cache, returning ``None`` on miss."""
+    if not path.is_file():
+        return None
+    try:
+        signature = _feature_cache_signature(samples)
+        with np.load(path, allow_pickle=False) as payload:
+            features = np.asarray(payload["features"], dtype=np.float32)
+            cached_signature = {
+                "sample_path": str(np.asarray(payload["sample_path"]).item()),
+                "sample_size": int(np.asarray(payload["sample_size"]).item()),
+                "sample_mtime_ns": int(np.asarray(payload["sample_mtime_ns"]).item()),
+            }
+            is_score = float(np.asarray(payload["is_score"]).item())
+            is_std = float(np.asarray(payload["is_std"]).item())
+        if cached_signature != signature:
+            print(f"[metrics] Inception cache stale, recomputing: {path}", file=sys.stderr)
+            return None
+        if features.shape != (num_images, 2048):
+            print(f"[metrics] Inception cache shape mismatch, recomputing: {path}", file=sys.stderr)
+            return None
+        if not np.isfinite(features).all() or not np.isfinite([is_score, is_std]).all():
+            print(f"[metrics] Inception cache contains non-finite values, recomputing: {path}", file=sys.stderr)
+            return None
+        print(f"[metrics] reusing generated Inception features: {path}", file=sys.stderr)
+        return features, (is_score, is_std)
+    except (OSError, KeyError, ValueError, TypeError, EOFError) as exc:
+        print(f"[metrics] invalid Inception cache ({exc}), recomputing: {path}", file=sys.stderr)
+        return None
+
+
+def _atomic_write_feature_cache(path: Path, samples: Path, features: np.ndarray, is_score: float, is_std: float) -> None:
+    """Atomically publish an uncompressed feature cache beside the samples."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    signature = _feature_cache_signature(samples)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            np.savez(
+                handle,
+                features=np.asarray(features, dtype=np.float32),
+                is_score=np.asarray(is_score, dtype=np.float64),
+                is_std=np.asarray(is_std, dtype=np.float64),
+                sample_path=np.asarray(signature["sample_path"]),
+                sample_size=np.asarray(signature["sample_size"], dtype=np.int64),
+                sample_mtime_ns=np.asarray(signature["sample_mtime_ns"], dtype=np.int64),
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _inception_features_and_is(
+    repo: Path, images: np.ndarray, batch_size: int, device: str = "cuda"
+) -> tuple[np.ndarray, tuple[float, float]]:
     """Extract pinned 2048-d Inception features once and calculate IS online.
 
     The released ``score.both`` helper hides the activation array after it
@@ -130,8 +213,9 @@ def _inception_features_and_is(repo: Path, images: np.ndarray, batch_size: int) 
     """
     import torch
 
-    if not torch.cuda.is_available():
-        raise RuntimeError("common CIFAR evaluation requires CUDA")
+    target_device = torch.device(device)
+    if target_device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA Inception extraction requested, but CUDA is unavailable")
     sys.path.insert(0, str(repo))
     from score.inception import InceptionV3
 
@@ -140,7 +224,7 @@ def _inception_features_and_is(repo: Path, images: np.ndarray, batch_size: int) 
     model = InceptionV3([
         InceptionV3.BLOCK_INDEX_BY_DIM[feature_dim],
         InceptionV3.BLOCK_INDEX_BY_DIM["prob"],
-    ]).cuda().eval()
+    ]).to(target_device).eval()
     features = np.empty((num_images, feature_dim), dtype=np.float32)
     split_sizes = np.array(
         [((index + 1) * num_images // _IS_SPLITS) - (index * num_images // _IS_SPLITS)
@@ -152,7 +236,9 @@ def _inception_features_and_is(repo: Path, images: np.ndarray, batch_size: int) 
 
     with torch.no_grad():
         for start in range(0, num_images, batch_size):
-            batch = torch.from_numpy(np.ascontiguousarray(images[start:start + batch_size])).float().cuda(non_blocking=True)
+            batch = torch.from_numpy(np.ascontiguousarray(images[start:start + batch_size])).float().to(
+                target_device, non_blocking=target_device.type == "cuda"
+            )
             end = start + len(batch)
             prediction = model(batch)
             features[start:end] = prediction[0].flatten(1).cpu().numpy().astype(np.float32, copy=False)
@@ -181,6 +267,34 @@ def _inception_features_and_is(repo: Path, images: np.ndarray, batch_size: int) 
             - np.sum(average_probability * np.log(average_probability), dtype=np.float64)
         ))
     return features, (float(np.mean(scores)), float(np.std(scores)))
+
+
+def _cached_inception_features_and_is(args, images: np.ndarray) -> tuple[np.ndarray, tuple[float, float]]:
+    """Extract Inception features once per sample artifact and reuse them.
+
+    The cache is opt-in at the evaluator API level and enabled by the shared
+    CCUA adapter for subsequent campaigns.  A missing or stale cache simply
+    falls back to the normal CUDA extraction path and is written atomically.
+    """
+    cache_value = getattr(args, "generated_features_cache", None)
+    samples_value = getattr(args, "samples", None)
+    cache = Path(cache_value) if cache_value else None
+    samples = Path(samples_value) if samples_value else None
+    if cache is not None and samples is not None:
+        cached = _load_feature_cache(cache, samples, len(images))
+        if cached is not None:
+            return cached
+
+    result = _inception_features_and_is(
+        args.repo,
+        images,
+        batch_size=args.inception_batch_size,
+        device=getattr(args, "device", "cuda"),
+    )
+    if cache is not None and samples is not None:
+        _atomic_write_feature_cache(cache, samples, result[0], result[1][0], result[1][1])
+        print(f"[metrics] cached generated Inception features: {cache}", file=sys.stderr)
+    return result
 
 
 def _validate_feature_pair(features: np.ndarray, reference: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -251,6 +365,114 @@ def _fid_to_statistics(features: np.ndarray, reference_mean: np.ndarray, referen
     ))
 
 
+def _require_cuda_torch():
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("GPU metric preview requires CUDA")
+    return torch, torch.device("cuda", torch.cuda.current_device())
+
+
+def _frechet_from_statistics_gpu(
+    generated_mean: np.ndarray,
+    generated_covariance: np.ndarray,
+    reference_mean: np.ndarray,
+    reference_covariance: np.ndarray,
+) -> float:
+    """Evaluate the standard sample-covariance FID formula on CUDA.
+
+    The PSD eigensolver form is numerically stable for covariance matrices and
+    differs from the release SciPy ``sqrtm`` only by floating-point/backend
+    round-off.  It is used by ``gpu_fast`` only; canonical paper FID continues
+    to call the pinned release implementation.
+    """
+    torch, device = _require_cuda_torch()
+    mu_generated = torch.as_tensor(np.asarray(generated_mean, dtype=np.float64), device=device)
+    cov_generated = torch.as_tensor(
+        np.asarray(generated_covariance, dtype=np.float64), device=device
+    )
+    mu_reference = torch.as_tensor(np.asarray(reference_mean, dtype=np.float64), device=device)
+    cov_reference = torch.as_tensor(
+        np.asarray(reference_covariance, dtype=np.float64), device=device
+    )
+    cov_generated = (cov_generated + cov_generated.T) * 0.5
+    cov_reference = (cov_reference + cov_reference.T) * 0.5
+    eigvals, eigvecs = torch.linalg.eigh(cov_generated)
+    sqrt_cov_generated = (
+        eigvecs * eigvals.clamp_min(0).sqrt().unsqueeze(0)
+    ) @ eigvecs.T
+    middle = sqrt_cov_generated @ cov_reference @ sqrt_cov_generated
+    middle = (middle + middle.T) * 0.5
+    middle_eigvals = torch.linalg.eigvalsh(middle).clamp_min(0)
+    mean_distance = (mu_generated - mu_reference).square().sum()
+    value = (
+        mean_distance
+        + torch.trace(cov_generated)
+        + torch.trace(cov_reference)
+        - 2.0 * middle_eigvals.sqrt().sum()
+    )
+    return float(value.item())
+
+
+def _fid_to_statistics_gpu(
+    features: np.ndarray,
+    reference_mean: np.ndarray,
+    reference_covariance: np.ndarray,
+) -> float:
+    generated = np.asarray(features)
+    if generated.ndim != 2 or len(generated) < 2:
+        raise ValueError(f"FID requires at least two generated feature vectors, got {generated.shape}")
+    torch, device = _require_cuda_torch()
+    generated_gpu = torch.as_tensor(
+        np.ascontiguousarray(generated, dtype=np.float64), device=device
+    )
+    generated_mean = generated_gpu.mean(dim=0)
+    centered = generated_gpu - generated_mean
+    generated_covariance = centered.T @ centered / (len(generated) - 1)
+    return _frechet_from_statistics_gpu(
+        generated_mean.detach().cpu().numpy(),
+        generated_covariance.detach().cpu().numpy(),
+        reference_mean,
+        reference_covariance,
+    )
+
+
+def _fid_low_rank_gpu(features: np.ndarray, reference: np.ndarray) -> float:
+    """CUDA version of the exact low-rank sample-covariance FID identity."""
+    generated, real = _validate_feature_pair(features, reference)
+    torch, device = _require_cuda_torch()
+    generated_gpu = torch.as_tensor(
+        np.ascontiguousarray(generated, dtype=np.float64), device=device
+    )
+    real_gpu = torch.as_tensor(np.ascontiguousarray(real, dtype=np.float64), device=device)
+    generated_mean = generated_gpu.mean(dim=0)
+    real_mean = real_gpu.mean(dim=0)
+    generated_factor = (generated_gpu - generated_mean) / np.sqrt(len(generated) - 1)
+    real_factor = (real_gpu - real_mean) / np.sqrt(len(real) - 1)
+    covariance_trace = generated_factor.square().sum() + real_factor.square().sum()
+    covariance_cross_trace = torch.linalg.svdvals(generated_factor @ real_factor.T).sum()
+    mean_distance = (generated_mean - real_mean).square().sum()
+    return float((mean_distance + covariance_trace - 2.0 * covariance_cross_trace).item())
+
+
+def _fid_gpu(features: np.ndarray, reference: np.ndarray) -> float:
+    """Use the same FID definition with a CUDA low-rank/eigensolver backend."""
+    generated, real = _validate_feature_pair(features, reference)
+    if _should_use_low_rank_fid(generated, real):
+        return _fid_low_rank_gpu(generated, real)
+    generated = np.asarray(generated, dtype=np.float64)
+    real = np.asarray(real, dtype=np.float64)
+    generated_mean = np.mean(generated, axis=0, dtype=np.float64)
+    real_mean = np.mean(real, axis=0, dtype=np.float64)
+    generated_centered = generated - generated_mean
+    real_centered = real - real_mean
+    generated_covariance = generated_centered.T @ generated_centered / (len(generated) - 1)
+    real_covariance = real_centered.T @ real_centered / (len(real) - 1)
+    return _frechet_from_statistics_gpu(
+        generated_mean, generated_covariance, real_mean, real_covariance
+    )
+
+
 def _standard_prd_scores(generated_features: np.ndarray, reference_features: np.ndarray,
                          nclass: int, *, legacy_repeat: bool = False) -> tuple[float, float]:
     """Run the existing 10-run Inception PRD protocol on reused activations.
@@ -307,6 +529,7 @@ def _base_protocol(nclass: int, args, sample_count: int = 50000) -> dict:
         "standard_prd": f"InceptionV3, {nclass * 20} clusters",
         "improved_prd": "VGG16 fc2, exact k-NN manifold k=3",
         "inception_batch_size": args.inception_batch_size,
+        "inception_device": getattr(args, "device", "cuda"),
     }
 
 
@@ -364,10 +587,8 @@ def _quick_prd_reference_subset(
 
 
 def _collect_headline_metrics(args, images: np.ndarray, nclass: int, dataset: str) -> tuple[dict, np.ndarray, np.ndarray]:
-    """Compute every shared headline metric from one generated feature array."""
-    generated_features, (is_score, is_std) = _inception_features_and_is(
-        args.repo, images, batch_size=args.inception_batch_size
-    )
+    """Compute every shared canonical headline metric from one feature array."""
+    generated_features, (is_score, is_std) = _cached_inception_features_and_is(args, images)
     reference_features = np.load(args.metrics_root / f"{dataset}_feats.npy", mmap_mode="r")
     prd_reference_features = reference_features
     if args.mode == "quick":
@@ -385,7 +606,7 @@ def _collect_headline_metrics(args, images: np.ndarray, nclass: int, dataset: st
         generated_features,
         prd_reference_features,
         nclass,
-        legacy_repeat=args.mode == "detailed",
+        legacy_repeat=getattr(args, "legacy_prd_repeat", False),
     )
     metrics = {
         "FID": float(fid),
@@ -405,6 +626,88 @@ def _collect_headline_metrics(args, images: np.ndarray, nclass: int, dataset: st
     return metrics, generated_features, reference_features
 
 
+def _collect_gpu_fast_metrics(
+    args, images: np.ndarray, nclass: int, dataset: str
+) -> tuple[dict, np.ndarray, np.ndarray]:
+    """Compute the fast 50k preview without the CPU Inception PRD pass.
+
+    Inception extraction is shared with the canonical phase through the cache.
+    FID uses the same sample-covariance definition on a CUDA eigensolver, KID
+    uses the same seeded subsets with CUDA Gram matrices, and VGG improved-PRD
+    remains a separate canonical phase.  The returned payload is explicitly
+    marked as preview-only by :func:`_evaluate`.
+    """
+    generated_features, (is_score, is_std) = _cached_inception_features_and_is(args, images)
+    reference_features = np.load(args.metrics_root / f"{dataset}_feats.npy", mmap_mode="r")
+    with np.load(args.metrics_root / f"{dataset}.train.npz") as statistics:
+        fid = _fid_to_statistics_gpu(
+            generated_features,
+            statistics["mu"][:],
+            statistics["sigma"][:],
+        )
+    metrics = {
+        "FID": float(fid),
+        "IS": float(is_score),
+        "IS_std": float(is_std),
+        "KID": polynomial_mmd_kid_gpu(
+            generated_features,
+            reference_features,
+            num_subsets=args.kid_subsets,
+            max_subset_size=args.kid_subset_size,
+            rng=np.random.default_rng(args.kid_seed),
+        ),
+    }
+    return metrics, generated_features, reference_features
+
+
+def _evaluate_improved_pr_only(
+    args, images: np.ndarray, labels: np.ndarray, counts: np.ndarray, nclass: int, dataset: str
+) -> dict:
+    """Compute only the canonical VGG16 improved Precision/Recall metrics.
+
+    This partial evaluator keeps the detailed mode's VGG16 fc2 and k=3
+    manifold definition, but skips the expensive CPU Inception PRD pass and
+    does not write a misleading full metric artifact under
+    ``metrics.native.json``.
+    """
+    reference_vgg_features = np.load(args.metrics_root / f"{dataset}_vgg16_fc2.npy", mmap_mode="r")
+    reference_radii = np.load(args.metrics_root / f"{dataset}_vgg16_fc2_k3_radii.npy", mmap_mode="r")
+    precision, recall = improved_prd_vgg16_k3(
+        np.asarray(images),
+        np.asarray(reference_vgg_features),
+        np.asarray(reference_radii),
+        batch_size=args.vgg_batch_size,
+        query_batch=args.knn_query_batch,
+        device=getattr(args, "device", "cuda"),
+    )
+    protocol = _base_protocol(nclass, args, sample_count=int(images.shape[0]))
+    protocol.update({
+        "evaluation_mode": "improved_pr_only",
+        "paper_report_ready": False,
+        "metric_backend": f"{getattr(args, 'device', 'cuda')}_vgg_exact",
+        "reported_metrics": ["ImprovedPrecision", "Recall"],
+        "omitted_metrics": ["FID", "IS", "F_8", "F_1_8", "KID", "sFID"],
+        "important_caveat": (
+            "Partial VGG16 fc2 exact k-NN manifold evaluation. A 10000-sample run is a "
+            "within-campaign screening result, not paper-reporting quality. Inception PRD "
+            "F_8/F_1_8 and all other metrics were intentionally skipped."
+        ),
+    })
+    payload = {
+        "metrics": {
+            "ImprovedPrecision": float(precision),
+            "Recall": float(recall),
+        },
+        "protocol": protocol,
+        "label_histogram": counts.tolist(),
+    }
+    metric_provenance = _metric_provenance(args)
+    if metric_provenance is not None:
+        payload["provenance"] = metric_provenance
+    _atomic_write_json(args.output, payload)
+    return payload
+
+
 def _per_class_payload(args, generated_features: np.ndarray, reference_features: np.ndarray,
                        labels: np.ndarray, nclass: int, dataset: str) -> dict:
     labels_path = args.metrics_root / f"{dataset}_labels.npy"
@@ -416,6 +719,14 @@ def _per_class_payload(args, generated_features: np.ndarray, reference_features:
     reference_labels = np.load(labels_path, mmap_mode="r")
     sys.path.insert(0, str(args.repo))
     from score.fid import calculate_frechet_distance
+    fid_backend = getattr(args, "metric_backend", "canonical")
+    if fid_backend not in {"canonical", "gpu"}:
+        raise ValueError(f"unknown FID backend {fid_backend!r}")
+
+    def compute_fid(generated_slice: np.ndarray, reference_slice: np.ndarray) -> float:
+        if fid_backend == "gpu":
+            return _fid_gpu(generated_slice, reference_slice)
+        return _fid(generated_slice, reference_slice, calculate_frechet_distance)
 
     per_class = {}
     for class_id in range(nclass):
@@ -424,7 +735,7 @@ def _per_class_payload(args, generated_features: np.ndarray, reference_features:
         generated_slice = generated_features[generated_mask]
         reference_slice = reference_features[reference_mask]
         per_class[str(class_id)] = {
-            "FID": _fid(generated_slice, reference_slice, calculate_frechet_distance),
+            "FID": compute_fid(generated_slice, reference_slice),
             "generated": int(generated_mask.sum()),
             "reference": int(reference_mask.sum()),
         }
@@ -434,7 +745,7 @@ def _per_class_payload(args, generated_features: np.ndarray, reference_features:
             generated_mask = np.isin(labels, classes)
             reference_mask = np.isin(reference_labels, classes)
             groups[name] = {
-                "FID": _fid(generated_features[generated_mask], reference_features[reference_mask], calculate_frechet_distance),
+                "FID": compute_fid(generated_features[generated_mask], reference_features[reference_mask]),
                 "classes": classes.tolist(),
                 "generated": int(generated_mask.sum()),
                 "reference": int(reference_mask.sum()),
@@ -453,6 +764,9 @@ def _per_class_payload(args, generated_features: np.ndarray, reference_features:
                 "exact sample-covariance FID; class slices whose generated-by-reference Gram matrix "
                 "is no larger than 2048-by-2048 use an equivalent low-rank nuclear-norm formulation, "
                 "while larger slices retain the release SciPy sqrtm formulation"
+                if fid_backend == "canonical" else
+                "same sample-covariance FID definition evaluated with CUDA float64 low-rank/eigensolver "
+                "kernels; use the canonical evaluator for paper values"
             ),
             "important_caveat": (
                 "Published split FIDs may use separately sampled 20k generated images per split. "
@@ -467,8 +781,45 @@ def _per_class_payload(args, generated_features: np.ndarray, reference_features:
 
 
 def _evaluate(args, images: np.ndarray, labels: np.ndarray, counts: np.ndarray, nclass: int) -> dict:
-    """Run one protocol, publishing the headline result before detailed work."""
+    """Run one protocol, publishing fast previews separately from paper output."""
     dataset = "cifar100" if nclass == 100 else "cifar10"
+    if args.mode == "improved_pr":
+        return _evaluate_improved_pr_only(args, images, labels, counts, nclass, dataset)
+    if args.mode == "gpu_fast":
+        args.metric_backend = "gpu"
+        metrics, generated_features, reference_features = _collect_gpu_fast_metrics(
+            args, images, nclass, dataset
+        )
+        protocol = _base_protocol(nclass, args, sample_count=int(images.shape[0]))
+        protocol.update({
+            "evaluation_mode": "gpu_fast",
+            "paper_report_ready": False,
+            "metric_backend": "cuda_preview",
+            "omitted_metrics": ["F_8", "F_1_8", "ImprovedPrecision", "Recall"],
+            "important_caveat": (
+                "Preview only: FID/KID and optional per-class/split FIDs use CUDA "
+                "kernels with the same mathematical definitions, while canonical "
+                "paper PRD and VGG improved-PRD are intentionally omitted."
+            ),
+        })
+        if args.per_class_output is not None:
+            per_class_payload = _per_class_payload(
+                args, generated_features, reference_features, labels, nclass, dataset
+            )
+            for name, group in per_class_payload["groups"].items():
+                metrics[f"{name}_FID"] = float(group["FID"])
+            _atomic_write_json(args.per_class_output, per_class_payload)
+        payload = {
+            "metrics": metrics,
+            "protocol": protocol,
+            "label_histogram": counts.tolist(),
+        }
+        metric_provenance = _metric_provenance(args)
+        if metric_provenance is not None:
+            payload["provenance"] = metric_provenance
+        _atomic_write_json(args.output, payload)
+        return payload
+
     headline_metrics, generated_features, reference_features = _collect_headline_metrics(args, images, nclass, dataset)
     sample_count = int(images.shape[0]) if args.mode == "quick" else 50000
     protocol = _base_protocol(nclass, args, sample_count=sample_count)
@@ -519,6 +870,7 @@ def _evaluate(args, images: np.ndarray, labels: np.ndarray, counts: np.ndarray, 
         np.asarray(reference_radii),
         batch_size=args.vgg_batch_size,
         query_batch=args.knn_query_batch,
+        device=getattr(args, "device", "cuda"),
     )
     metrics["ImprovedPrecision"] = float(precision)
     metrics["Recall"] = float(recall)
@@ -543,8 +895,11 @@ def main() -> None:
     parser.add_argument("--metrics-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
-        "--mode", choices=("detailed", "headline", "quick"), default="detailed",
-        help="detailed preserves legacy 50k VGG/per-class behavior; headline emits fast common metrics plus KID; quick accepts a smaller class-uniform smoke sample",
+        "--mode", choices=("detailed", "headline", "quick", "gpu_fast", "improved_pr"), default="detailed",
+        help=("detailed preserves canonical 50k VGG/per-class behavior; headline emits "
+              "canonical common metrics without details; quick accepts a smaller class-uniform "
+              "smoke sample; gpu_fast emits a 50k CUDA preview without Inception PRD/VGG; "
+              "improved_pr emits only canonical VGG improved Precision/Recall"),
     )
     parser.add_argument(
         "--headline-output", type=Path, default=None,
@@ -553,6 +908,18 @@ def main() -> None:
     parser.add_argument(
         "--inception-batch-size", type=int, default=16,
         help="GPU micro-batch for the pinned Inception FID/IS/PRD/KID feature pass (default: 16)",
+    )
+    parser.add_argument(
+        "--device", choices=("cuda", "cpu"), default="cuda",
+        help="device for Inception/VGG features and exact k-NN metrics; CPU mode avoids shared-GPU memory pressure",
+    )
+    parser.add_argument(
+        "--generated-features-cache", type=Path, default=None,
+        help="optional atomic .npz cache for generated 2048-d Inception features and IS",
+    )
+    parser.add_argument(
+        "--legacy-prd-repeat", action="store_true",
+        help="repeat the stochastic 10-run PRD call for historical compatibility; disabled by default",
     )
     parser.add_argument("--vgg-batch-size", type=int, default=128)
     parser.add_argument("--knn-query-batch", type=int, default=1024)
@@ -598,6 +965,8 @@ def main() -> None:
         parser.error("--headline-output must differ from --output in detailed mode so the headline result remains available")
 
     args.samples = Path(args.samples).resolve()
+    if args.generated_features_cache is not None:
+        args.generated_features_cache = Path(args.generated_features_cache).resolve()
     args.sample_provenance = _load_expected_sample_provenance(args, args.samples)
     images = np.load(args.samples, mmap_mode="r")
     labels = np.load(args.labels, mmap_mode="r")
@@ -605,6 +974,11 @@ def main() -> None:
     if args.mode in ("detailed", "headline"):
         if images.shape != (50000, 3, 32, 32) or labels.shape != (50000,):
             raise ValueError(f"paper protocol requires 50k CIFAR arrays, got images={images.shape} labels={labels.shape}")
+    elif args.mode == "improved_pr":
+        if images.ndim != 4 or images.shape[1:] != (3, 32, 32):
+            raise ValueError(f"improved_pr requires images with shape [N, 3, 32, 32], got {images.shape}")
+        if labels.ndim != 1 or labels.shape != (images.shape[0],) or images.shape[0] < 3:
+            raise ValueError(f"improved_pr requires matching labels and at least 3 images, got {images.shape}/{labels.shape}")
     else:
         if images.ndim != 4 or images.shape[1:] != (3, 32, 32):
             raise ValueError(f"quick protocol requires images with shape [N, 3, 32, 32], got {images.shape}")

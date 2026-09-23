@@ -11,11 +11,6 @@ _PATTERNS={
  "KID":re.compile(r"KID[:=]\s*([0-9.eE+-]+)"),
 }
 
-_CORAL_IMPROVED_PRD = re.compile(
-    r"Improved PRD:\s*([0-9.eE+-]+),\s*RECALL:\s*([0-9.eE+-]+)", re.I)
-_CORAL_PRD = re.compile(
-    r"PRD PRECISION:\s*([0-9.eE+-]+),\s*RECALL:\s*([0-9.eE+-]+)", re.I)
-
 def _put(out,key,value):
     try:
         v=float(value)
@@ -28,18 +23,6 @@ def parse_text_metrics(path: Path)->Dict[str,float]:
     for k,p in _PATTERNS.items():
         m=p.findall(text)
         if m: _put(out,k,m[-1])
-    # CORAL labels the two PRD values "precision" and "recall" in its log,
-    # but its paper reports them as F_8 and F_1/8.  Parse the paired lines
-    # before the generic Recall regex can silently conflate two different
-    # metrics.  Improved PRD recall is the table's Recall column.
-    improved = _CORAL_IMPROVED_PRD.findall(text)
-    if improved:
-        _put(out, "ImprovedPrecision", improved[-1][0])
-        _put(out, "Recall", improved[-1][1])
-    prd = _CORAL_PRD.findall(text)
-    if prd:
-        _put(out, "F_8", prd[-1][0])
-        _put(out, "F_1_8", prd[-1][1])
     return out
 
 def _flatten(prefix,obj,out):
@@ -56,43 +39,21 @@ _BOOKKEEPING = ("num_generated", "num_reference", "generated", "reference",
                 "seed", "samples", "label_histogram")
 
 
-def _is_unified_v2_run(run_dir: Path) -> bool:
-    """Identify the migrated host without importing the vendored trainer."""
-    try:
-        payload = json.loads((run_dir / "unified_host.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return False
-    return (
-        isinstance(payload, dict)
-        and payload.get("host_revision") == "t2h-unified-common-v2"
-        and payload.get("checkpoint_schema") == 2
-    )
-
 def _is_bookkeeping(key: str) -> bool:
     return key.rsplit("/", 1)[-1] in _BOOKKEEPING
 
 def collect_metrics(run_dir: Path)->Dict[str,float]:
     out={}
-    unified_v2 = _is_unified_v2_run(run_dir)
     semantic=run_dir/"semantic_metrics.json"
     if semantic.exists():
         p=json.loads(semantic.read_text())
         for k in ("js","rare_mode_mass","coarse_consistency","memorization","num_generated"):
             if k in p: _put(out,f"semantic/{k}",p[k])
         _flatten("generation",p.get("generation",{}),out); _flatten("safety",p.get("safety",{}),out)
-    text_candidates = [] if unified_v2 else [run_dir/"stdout.log", *run_dir.glob("res_ema_*.txt"), *run_dir.glob("eval.txt")]
+    text_candidates = [run_dir/"stdout.log", *run_dir.glob("res_ema_*.txt"), *run_dir.glob("eval.txt")]
     for path in text_candidates:
         for k,v in parse_text_metrics(path).items(): out[f"generation/{k}"]=v
-    metric_paths = run_dir.rglob("metrics*.json")
-    if unified_v2:
-        # A common-host run is allowed to publish only its namespaced metric
-        # outputs.  In particular, do not let an old native metrics file or a
-        # stale stdout line overwrite the new value in W&B.
-        metric_paths = (
-            path for path in metric_paths
-            if path.name in {"metrics.unified.v2.json", "metrics.per_class.v2.json", "metrics.imagenet.json"}
-        )
-    for path in metric_paths:
+    for path in run_dir.rglob("metrics*.json"):
         if path.name=="metrics.collected.json": continue
         try: payload = json.loads(path.read_text())
         except Exception: continue

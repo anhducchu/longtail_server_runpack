@@ -22,15 +22,9 @@ def test_shared_metrics_json_unwraps_to_clean_keys(tmp_path):
     assert not any("protocol" in k or "label_histogram" in k for k in out)
 
 
-def test_namespaced_host_ignores_legacy_metric_files(tmp_path):
-    (tmp_path / "unified_host.json").write_text(json.dumps({
-        "host_revision": "t2h-unified-common-v2", "checkpoint_schema": 2,
-    }))
-    (tmp_path / "metrics.unified.v2.json").write_text(json.dumps({
+def test_native_metric_file_is_collected(tmp_path):
+    (tmp_path / "metrics.native.json").write_text(json.dumps({
         "metrics": {"FID": 12.3},
-    }))
-    (tmp_path / "metrics.unified.json").write_text(json.dumps({
-        "metrics": {"FID": 99.0},
     }))
     assert collect_metrics(tmp_path)["generation/FID"] == 12.3
 
@@ -56,10 +50,10 @@ def test_per_class_metrics_keeps_only_the_tail_summary(tmp_path):
     assert len(out) < 15
 
 
-def test_legacy_flat_metrics_json_still_flattens_directly(tmp_path):
-    """A flat legacy-shaped metric payload still flattens directly."""
-    (tmp_path / "metrics.cm.json").write_text(json.dumps({
-        "protocol": "CM CIFAR-LT cifar10: released CM FID-Inception/FID/KID",
+def test_flat_metrics_json_still_flattens_directly(tmp_path):
+    """A flat metric payload still flattens directly."""
+    (tmp_path / "metrics.extra.json").write_text(json.dumps({
+        "protocol": "additional baseline metric output",
         "FID": 9.5, "KID": {"mean": 0.02, "std": 0.001, "all": [0.02, 0.021]},
         "num_generated": 20000, "num_reference": 20000, "seed": 0,
     }))

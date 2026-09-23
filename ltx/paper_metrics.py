@@ -1,14 +1,11 @@
 """Shared paper-facing generation metrics.
 
-The public CBDM release uses an Inception/k=5 approximation.  This module
-implements the evaluator stated in the paper and is deliberately shared by all
-methods, including T2H.  It uses chunked exact squared distances, avoiding a
+This module implements the paper evaluator shared by all four objectives. It
+uses chunked exact squared distances, avoiding a
 50k×50k host allocation.
 
-``polynomial_mmd_kid`` is the unbiased cubic-kernel estimate used by the CM
-release.  The CM source draws from NumPy's process-global RNG; this runpack
-accepts an explicit generator so a KID value is reproducible and therefore
-comparable across independently launched method jobs.
+``polynomial_mmd_kid`` is an unbiased cubic-kernel estimate. This runpack
+accepts an explicit generator so a KID value is reproducible across jobs.
 """
 from __future__ import annotations
 
@@ -28,7 +25,7 @@ def polynomial_mmd_kid(
     max_subset_size: int = 1000,
     rng: np.random.Generator | None = None,
 ) -> float:
-    """Compute KID with CM's cubic polynomial kernel estimator.
+    """Compute KID with the cubic polynomial kernel estimator.
 
     This is algebraically identical to the released reference implementation
     except that subset draws use a caller-controlled random generator.  It is
@@ -59,27 +56,92 @@ def polynomial_mmd_kid(
     return float(total / int(num_subsets) / subset)
 
 
-def _torch():
+def polynomial_mmd_kid_gpu(
+    generated_features: np.ndarray,
+    reference_features: np.ndarray,
+    *,
+    num_subsets: int = 100,
+    max_subset_size: int = 1000,
+    rng: np.random.Generator | None = None,
+    device=None,
+) -> float:
+    """Compute the same cubic KID estimator with CUDA matrix multiplies.
+
+    NumPy chooses the subset indices exactly as in :func:`polynomial_mmd_kid`;
+    only the Gram-matrix arithmetic is moved to torch/CUDA.  This is intended
+    for fast monitoring.  The canonical paper path remains the NumPy
+    implementation so its historical numbers are not silently changed by a
+    backend switch.
+    """
+    generated = np.asarray(generated_features, dtype=np.float32)
+    reference = np.asarray(reference_features, dtype=np.float32)
+    if generated.ndim != 2 or reference.ndim != 2 or generated.shape[1] != reference.shape[1]:
+        raise ValueError(
+            "KID expects generated/reference arrays with matching [N, feature_dim] shapes, got "
+            f"{generated.shape} and {reference.shape}"
+        )
+    subset = min(len(generated), len(reference), int(max_subset_size))
+    if subset < 2:
+        raise ValueError("KID requires at least two generated and two reference feature vectors")
+    if int(num_subsets) < 1:
+        raise ValueError("KID requires num_subsets >= 1")
+
+    torch = _torch()
+    if device is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+    if getattr(device, "type", None) != "cuda":
+        raise ValueError(f"GPU KID requires a CUDA device, got {device}")
+
+    generator = rng or np.random.default_rng(0)
+    dim = generated.shape[1]
+    generated_gpu = torch.from_numpy(np.ascontiguousarray(generated)).to(device)
+    reference_gpu = torch.from_numpy(np.ascontiguousarray(reference)).to(device)
+    total = torch.zeros((), dtype=torch.float32, device=device)
+    with torch.inference_mode():
+        for _ in range(int(num_subsets)):
+            generated_indices = torch.from_numpy(
+                np.asarray(generator.choice(len(generated), subset, replace=False), dtype=np.int64)
+            ).to(device)
+            reference_indices = torch.from_numpy(
+                np.asarray(generator.choice(len(reference), subset, replace=False), dtype=np.int64)
+            ).to(device)
+            x = generated_gpu.index_select(0, generated_indices)
+            y = reference_gpu.index_select(0, reference_indices)
+            kxx = (x @ x.T / dim + 1.0).pow(3)
+            kyy = (y @ y.T / dim + 1.0).pow(3)
+            kxy = (x @ y.T / dim + 1.0).pow(3)
+            total = total + (
+                (kxx.sum() - torch.diagonal(kxx).sum()
+                 + kyy.sum() - torch.diagonal(kyy).sum()) / (subset - 1)
+                - 2.0 * kxy.sum() / subset
+            )
+    return float((total / int(num_subsets) / subset).item())
+
+
+def _torch(device="cuda"):
     import torch
-    if not torch.cuda.is_available():
-        raise RuntimeError("CORAL paper metrics require a CUDA GPU")
+    if torch.device(device).type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("paper metrics require a CUDA GPU")
     return torch
 
 
-def vgg16_fc2(images: np.ndarray, batch_size: int = 128) -> np.ndarray:
+def vgg16_fc2(images: np.ndarray, batch_size: int = 128, device="cuda") -> np.ndarray:
     """Match the released IPR extractor: resize to 224 then VGG16 fc2."""
-    torch = _torch()
+    torch = _torch(device)
+    target_device = torch.device(device)
     from torchvision import models
     try:
         weights = models.VGG16_Weights.IMAGENET1K_V1
         model = models.vgg16(weights=weights)
     except AttributeError:  # torchvision < 0.13
         model = models.vgg16(pretrained=True)
-    model = model.cuda().eval()
+    model = model.to(target_device).eval()
     result = np.empty((len(images), 4096), dtype=np.float32)
     with torch.inference_mode():
         for start in range(0, len(images), batch_size):
-            batch = torch.from_numpy(np.ascontiguousarray(images[start:start + batch_size])).float().cuda(non_blocking=True)
+            batch = torch.from_numpy(np.ascontiguousarray(images[start:start + batch_size])).float().to(
+                target_device, non_blocking=target_device.type == "cuda"
+            )
             if batch.shape[-2:] != (224, 224):
                 batch = torch.nn.functional.interpolate(batch, size=(224, 224))
             features = model.features(batch).flatten(1)
@@ -88,7 +150,7 @@ def vgg16_fc2(images: np.ndarray, batch_size: int = 128) -> np.ndarray:
 
 
 def _dist2(query, bank, bank_norm):
-    torch = _torch()
+    torch = _torch(query.device)
     out = query.square().sum(dim=1, keepdim=True) + bank_norm.unsqueeze(0) - 2 * (query @ bank.T)
     return out.clamp_min_(0)
 
@@ -156,7 +218,7 @@ def _knn_radii_faiss(features: np.ndarray, k: int, *, torch, faiss) -> np.ndarra
         del index, cpu_index, resources
 
 
-def knn_radii(features: np.ndarray, k: int = 3, query_batch: int = 1024) -> np.ndarray:
+def knn_radii(features: np.ndarray, k: int = 3, query_batch: int = 1024, device="cuda") -> np.ndarray:
     """Exact k-NN manifold radii; the self-distance is explicitly excluded.
 
     ``LTX_METRICS_KNN_BACKEND=faiss`` forces the optional exact FAISS backend;
@@ -165,11 +227,14 @@ def knn_radii(features: np.ndarray, k: int = 3, query_batch: int = 1024) -> np.n
     """
     if len(features) <= k:
         raise ValueError(f"k-NN radii require more than k samples, got n={len(features)} k={k}")
-    torch = _torch()
+    torch = _torch(device)
+    target_device = torch.device(device)
+    if target_device.type == "cuda" and target_device.index is None:
+        target_device = torch.device("cuda", torch.cuda.current_device())
     backend = os.environ.get("LTX_METRICS_KNN_BACKEND", "auto").lower()
     if backend not in {"auto", "faiss", "torch"}:
         raise ValueError("LTX_METRICS_KNN_BACKEND must be one of: auto, faiss, torch")
-    if backend != "torch":
+    if target_device.type == "cuda" and backend != "torch":
         faiss = _faiss_gpu_module()
         if faiss is None and backend == "faiss":
             raise RuntimeError("LTX_METRICS_KNN_BACKEND=faiss requested but GPU FAISS is unavailable")
@@ -184,24 +249,22 @@ def knn_radii(features: np.ndarray, k: int = 3, query_batch: int = 1024) -> np.n
                     RuntimeWarning,
                     stacklevel=2,
                 )
-    return _knn_radii_torch(
-        features,
-        k,
-        query_batch,
-        device=torch.device("cuda", torch.cuda.current_device()),
-    )
+    return _knn_radii_torch(features, k, query_batch, device=target_device)
 
 
 def manifold_membership(query_features: np.ndarray, manifold_features: np.ndarray, manifold_radii: np.ndarray,
-                        query_batch: int = 1024) -> float:
+                        query_batch: int = 1024, device="cuda") -> float:
     """Fraction of query features lying in the (exact) k-NN manifold."""
-    torch = _torch()
+    torch = _torch(device)
+    target_device = torch.device(device)
+    if target_device.type == "cuda" and target_device.index is None:
+        target_device = torch.device("cuda", torch.cuda.current_device())
     return _manifold_membership_torch(
         query_features,
         manifold_features,
         manifold_radii,
         query_batch=query_batch,
-        device=torch.device("cuda", torch.cuda.current_device()),
+        device=target_device,
     )
 
 
@@ -272,16 +335,21 @@ def _fused_cross_membership_torch(
 
 
 def improved_prd_vgg16_k3(generated_images: np.ndarray, reference_features: np.ndarray,
-                           reference_radii: np.ndarray, batch_size: int = 128, query_batch: int = 1024) -> tuple[float, float]:
-    torch = _torch()
-    device = torch.device("cuda", torch.cuda.current_device())
-    generated_features = vgg16_fc2(generated_images, batch_size=batch_size)
-    generated_radii = knn_radii(generated_features, k=3, query_batch=query_batch)
+                           reference_radii: np.ndarray, batch_size: int = 128, query_batch: int = 1024,
+                           device="cuda") -> tuple[float, float]:
+    torch = _torch(device)
+    target_device = torch.device(device)
+    if target_device.type == "cuda" and target_device.index is None:
+        target_device = torch.device("cuda", torch.cuda.current_device())
+    generated_features = vgg16_fc2(generated_images, batch_size=batch_size, device=target_device)
+    generated_radii = knn_radii(
+        generated_features, k=3, query_batch=query_batch, device=target_device
+    )
     return _fused_cross_membership_torch(
         generated_features,
         reference_features,
         generated_radii,
         reference_radii,
         query_batch=query_batch,
-        device=device,
+        device=target_device,
     )

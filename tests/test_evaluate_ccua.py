@@ -72,6 +72,10 @@ def _args(tmp_path: Path, *, mode: str, headline_output: Path | None = None) -> 
         metrics_root=tmp_path / "metrics",
         output=tmp_path / "metrics.json",
         headline_output=headline_output,
+        samples=None,
+        generated_features_cache=None,
+        legacy_prd_repeat=False,
+        metric_backend="canonical",
         inception_batch_size=16,
         vgg_batch_size=128,
         knn_query_batch=1024,
@@ -99,7 +103,11 @@ def test_headline_mode_reuses_one_inception_pass_includes_seeded_kid_and_skips_d
     monkeypatch.setattr(
         evaluator,
         "_inception_features_and_is",
-        lambda repo, images, batch_size: (inception_calls.append((repo, images, batch_size)) or generated_features, (8.5, 0.2)),
+        lambda repo, images, batch_size, *, device: (
+            inception_calls.append((repo, images, batch_size, device))
+            or generated_features,
+            (8.5, 0.2),
+        ),
     )
     monkeypatch.setattr(evaluator, "_standard_prd_scores", lambda generated, reference, nclass, **_: (0.61, 0.42))
     kid_calls = []
@@ -198,7 +206,7 @@ def test_quick_mode_returns_only_fast_metrics_and_skips_vgg_and_per_class(tmp_pa
     monkeypatch.setattr(
         evaluator,
         "_inception_features_and_is",
-        lambda repo, images, batch_size: (generated_features, (8.5, 0.2)),
+        lambda repo, images, batch_size, *, device: (generated_features, (8.5, 0.2)),
     )
     prd_calls = []
 
@@ -262,7 +270,7 @@ def test_quick_mode_writes_dynamic_per_class_output_without_vgg(tmp_path, monkey
     monkeypatch.setattr(
         evaluator,
         "_inception_features_and_is",
-        lambda repo, images, batch_size: (generated_features, (8.5, 0.2)),
+        lambda repo, images, batch_size, *, device: (generated_features, (8.5, 0.2)),
     )
     monkeypatch.setattr(evaluator, "_standard_prd_scores", lambda generated, reference, nclass, **_: (0.61, 0.42))
     monkeypatch.setattr(evaluator, "polynomial_mmd_kid", lambda *args, **kwargs: 0.0125)
@@ -369,3 +377,108 @@ def test_detailed_mode_publishes_atomic_headline_before_vgg_and_keeps_it_separat
     assert payload["metrics"]["Recall"] == 0.8
     assert "evaluation_mode" not in payload["protocol"]
     assert "ImprovedPrecision" not in json.loads(headline_output.read_text(encoding="utf-8"))["metrics"]
+
+
+def test_generated_inception_cache_is_reused_only_for_the_same_sample_artifact(tmp_path, monkeypatch):
+    evaluator = _evaluator_module()
+    samples = tmp_path / "samples.npy"
+    np.save(samples, np.zeros((3, 3, 32, 32), dtype=np.uint8))
+    args = _args(tmp_path, mode="detailed")
+    args.samples = samples
+    args.generated_features_cache = tmp_path / "inception_features.npz"
+    features = np.zeros((3, 2048), dtype=np.float32)
+    calls = []
+
+    def fake_extract(repo, images, batch_size, *, device):
+        calls.append((repo, images, batch_size, device))
+        return features, (4.0, 0.2)
+
+    monkeypatch.setattr(evaluator, "_inception_features_and_is", fake_extract)
+    first = evaluator._cached_inception_features_and_is(args, np.zeros((3, 3, 32, 32), dtype=np.uint8))
+    second = evaluator._cached_inception_features_and_is(args, np.zeros((3, 3, 32, 32), dtype=np.uint8))
+
+    assert len(calls) == 1
+    np.testing.assert_array_equal(first[0], features)
+    np.testing.assert_array_equal(second[0], features)
+    assert second[1] == (4.0, 0.2)
+
+
+def test_gpu_fast_mode_publishes_preview_and_keeps_split_fids_out_of_canonical_names(tmp_path, monkeypatch):
+    evaluator = _evaluator_module()
+    args = _args(tmp_path, mode="gpu_fast")
+    args.per_class_output = tmp_path / "fast_per_class.json"
+    fast_metrics = {"FID": 8.0, "IS": 7.0, "IS_std": 0.1, "KID": 0.02}
+    generated = np.zeros((20, 4), dtype=np.float32)
+    reference = np.zeros((40, 4), dtype=np.float32)
+    monkeypatch.setattr(
+        evaluator,
+        "_collect_gpu_fast_metrics",
+        lambda *_: (dict(fast_metrics), generated, reference),
+    )
+    monkeypatch.setattr(
+        evaluator,
+        "_per_class_payload",
+        lambda *_: {"groups": {"Many": {"FID": 1.0}, "Medium": {"FID": 2.0}, "Few": {"FID": 3.0}}},
+    )
+
+    payload = evaluator._evaluate(
+        args,
+        images=np.zeros((20, 3, 32, 32), dtype=np.uint8),
+        labels=np.repeat(np.arange(10, dtype=np.int64), 2),
+        counts=np.full(10, 2),
+        nclass=10,
+    )
+
+    assert payload["protocol"]["evaluation_mode"] == "gpu_fast"
+    assert payload["protocol"]["paper_report_ready"] is False
+    assert payload["metrics"]["Few_FID"] == 3.0
+    assert payload["protocol"]["omitted_metrics"] == ["F_8", "F_1_8", "ImprovedPrecision", "Recall"]
+    assert json.loads(args.output.read_text(encoding="utf-8")) == payload
+    assert args.per_class_output.exists()
+
+
+def test_improved_pr_mode_skips_inception_prd_and_writes_only_precision_recall(tmp_path, monkeypatch):
+    evaluator = _evaluator_module()
+    args = _args(tmp_path, mode="improved_pr")
+    args.metrics_root.mkdir()
+    np.save(args.metrics_root / "cifar10_vgg16_fc2.npy", np.zeros((40, 6), dtype=np.float32))
+    np.save(args.metrics_root / "cifar10_vgg16_fc2_k3_radii.npy", np.ones(40, dtype=np.float32))
+
+    observed = {}
+
+    def fake_improved(
+        images, reference_features, reference_radii, *, batch_size, query_batch, device
+    ):
+        observed.update({
+            "images": images,
+            "reference_features": reference_features,
+            "reference_radii": reference_radii,
+            "batch_size": batch_size,
+            "query_batch": query_batch,
+            "device": device,
+        })
+        return 0.71, 0.43
+
+    monkeypatch.setattr(evaluator, "improved_prd_vgg16_k3", fake_improved)
+    monkeypatch.setattr(
+        evaluator,
+        "_cached_inception_features_and_is",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("improved_pr must skip Inception")),
+    )
+
+    payload = evaluator._evaluate(
+        args,
+        images=np.zeros((20, 3, 32, 32), dtype=np.uint8),
+        labels=np.repeat(np.arange(10, dtype=np.int64), 2),
+        counts=np.full(10, 2),
+        nclass=10,
+    )
+
+    assert payload["metrics"] == {"ImprovedPrecision": 0.71, "Recall": 0.43}
+    assert payload["protocol"]["evaluation_mode"] == "improved_pr_only"
+    assert payload["protocol"]["reported_metrics"] == ["ImprovedPrecision", "Recall"]
+    assert "F_8" in payload["protocol"]["omitted_metrics"]
+    assert json.loads(args.output.read_text(encoding="utf-8")) == payload
+    assert observed["batch_size"] == 128
+    assert observed["query_batch"] == 1024
+    assert observed["device"] == "cuda"

@@ -133,9 +133,16 @@ def wandb_config(task: Task) -> Dict[str, object]:
             config[f"eval/{key}"] = evaluate[key]
     config.setdefault("eval/inception_batch_size", int(evaluate.get("inception_batch_size", 16)))
     for key in (
-        "objective", "cb_tau", "ccua_al", "ccua_ucl", "ipsvt_mode",
-        "ipsvt_K", "ipsvt_s", "ipsvt_delta", "ipsvt_tau", "ipsvt_every",
-        "ipsvt_batch", "ipsvt_lambda_aux", "ipsvt_lambda_svt",
+        "objective", "cb_tau", "ccua_al", "ccua_ucl", "data_sampling",
+        "cfg_dropout", "uncertainty", "donor_pool", "lambda_trust",
+        "lambda_explore", "cross_class_donors", "aux_batch_size",
+        "controller_width", "gamma_init", "explore_strength",
+        "max_explore_ratio", "lambda_reverse_kl", "self_logit_init",
+        "extra_variance_init", "max_variance_ratio",
+        "lambda_total", "posterior_temperature", "explore_temperature",
+        "benefit_margin",
+        "null_logit_init", "margin", "t_min", "t_max", "endpoint_clip",
+        "tau", "lambda",
     ):
         if key in task.method_config:
             config[f"objective/{key}"] = task.method_config[key]
@@ -144,6 +151,9 @@ def wandb_config(task: Task) -> Dict[str, object]:
         config["resume/mode"] = str(task.method_config.get("resume_mode", "full"))
         if task.method_config.get("resume_step"):
             config["resume/step"] = task.method_config["resume_step"]
+    for key in ("checkpoint_interval_steps", "auto_resume_max_attempts", "auto_resume_exit_codes"):
+        if key in task.retry:
+            config[f"reliability/{key}"] = task.retry[key]
     flags = task.method_config.get("flags")
     if flags:
         config["method_flags"] = " ".join(map(str, flags))
@@ -210,8 +220,8 @@ def init_wandb(task: Task, run_dir: Path):
             entity=task.runtime.get("wandb_entity") or os.environ.get("WANDB_ENTITY") or None,
             # Name by what identifies the row in the table, plus this attempt's
             # start time: the stage name is an internal adapter-grouping label
-            # ("..._cm-cm-s0", "..._t2h-t2h-s0", meaningless "core" for
-            # DDPM/CBDM/CORAL), and an un-dated name is exactly what let a
+            # (for example, a generic "core" stage), and an un-dated name is
+            # exactly what let a
             # fresh attempt look like a continuation of an old crashed one.
             name=f"{dataset}-{task.method}-s{task.seed}-{start_label}",
             id=run_id,
@@ -391,6 +401,12 @@ def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     attempt = int(row.get("attempt", 1))
+    if attempt > 1:
+        print(
+            f"[ltx] recovery attempt={attempt} task={task.id}; "
+            "adapter will resume the newest complete checkpoint",
+            flush=True,
+        )
     batch_size = resolve_batch_size(task, attempt)
     effective_batch = batch_size if batch_size is not None else int(task.train.get("batch_size", 128))
 
@@ -423,8 +439,8 @@ def main() -> None:
         monitor.start()
         adapter = make_adapter(task.adapter, Path(args.root))
         phases = adapter.phases(task, batch_size=batch_size)
-        # CBDM/CORAL/OC's own main.py calls wandb.init(project="longtail-baselines", ...)
-        # during --train, hardcoded and disconnected from this task's run (wrong
+        # Vendored trainers may call wandb.init with hardcoded settings during
+        # --train, disconnected from this task's run (wrong
         # project, no id, name collides across every task/seed). Disabling wandb
         # inside the subprocess is a no-op for it; the real loss curve already
         # reaches this task's W&B run via the Monitor's tensorboard mirror below.
@@ -466,7 +482,15 @@ def main() -> None:
             tail = stdout_log.read_text(encoding="utf-8", errors="replace")[-10000:]
         is_oom = "out of memory" in (message + tail).lower()
         max_attempts = int(task.retry.get("max_attempts", 2))
-        status = state.retry_or_fail(task.id, exit_code, message + (" [OOM]" if is_oom else ""), max_attempts, task.retry.get("retry_exit_codes"))
+        status = state.retry_or_fail(
+            task.id,
+            exit_code,
+            message + (" [OOM]" if is_oom else ""),
+            max_attempts=max_attempts,
+            retry_exit_codes=task.retry.get("retry_exit_codes"),
+            auto_resume_max_attempts=task.retry.get("auto_resume_max_attempts"),
+            auto_resume_exit_codes=task.retry.get("auto_resume_exit_codes"),
+        )
         if wb_run is not None:
             wb_run.summary["status"] = status
             wb_run.summary["error"] = message

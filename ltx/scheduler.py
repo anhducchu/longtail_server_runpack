@@ -172,9 +172,30 @@ class Scheduler:
         for task_id, proc in self.processes.items():
             code = proc.poll()
             if code is not None:
-                finished.append(task_id)
+                finished.append((task_id, code))
                 print(f"[ltx] worker exited task={task_id} code={code}", flush=True)
-        for task_id in finished:
+        for task_id, code in finished:
+            # A SIGKILL can terminate the worker before its exception handler
+            # writes a terminal state.  Preserve the observed exit code and
+            # apply the task's retry policy here.  If the worker did write its
+            # result (for example, a killed phase), leave that state intact.
+            if self.state.get(task_id)["status"] == "running":
+                # The phase subprocess inherits the worker's process group.
+                # If the worker itself was SIGKILLed, its child cannot run the
+                # worker's cleanup handler and would otherwise keep writing the
+                # same run directory while the retry starts.  Kill only this
+                # worker-owned group before requeueing; it is never a blanket
+                # kill of another user's processes.
+                worker_pid = getattr(proc, "pid", None)
+                if worker_pid is not None:
+                    try:
+                        os.killpg(worker_pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                status = self.state.recover_worker_exit(
+                    task_id, code, f"Worker exited before updating state (exit {code})",
+                )
+                print(f"[ltx] worker state task={task_id} status={status} code={code}", flush=True)
             self.processes.pop(task_id, None)
             self.gpu_for_task.pop(task_id, None)
             handle = self.launcher_logs.pop(task_id, None)
