@@ -9,6 +9,7 @@ __pycache__/
 data/
 runs/
 wandb/
+third_party/VENDOR_AND_ENV.txt
 
 # Generated experiment artifacts. Keep source/configuration and human-written
 # summaries in Git; keep checkpoints, arrays, logs, and rendered outputs local.
