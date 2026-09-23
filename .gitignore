@@ -1,4 +1,6 @@
 .env
+.env.*
+!.env.example
 .venv/
 .pytest_cache/
 __pycache__/
@@ -7,3 +9,29 @@ __pycache__/
 data/
 runs/
 wandb/
+
+# Generated experiment artifacts. Keep source/configuration and human-written
+# summaries in Git; keep checkpoints, arrays, logs, and rendered outputs local.
+outputs*/
+*_outputs*/
+smoke_*/
+server_results*/
+results_*/
+benchmark/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.npy
+*.npz
+*.log
+*.csv
+*.png
+*_DIAGNOSTICS.json
+events.out.tfevents.*
+.expiry_*.json
+
+# Metric assets are regenerated locally. Only the small provenance manifest is
+# versioned so a checkout records which cache should be prepared.
+third_party/CCUA-DDPM/stats/*
+!third_party/CCUA-DDPM/stats/*.metric_manifest.json
