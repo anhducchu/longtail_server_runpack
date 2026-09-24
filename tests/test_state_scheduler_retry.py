@@ -97,7 +97,6 @@ def test_scheduler_reap_records_killed_worker_using_auto_resume_policy(tmp_path)
     })
     campaign = LoadedCampaign(
         root=tmp_path,
-        config_path=tmp_path / "campaign.yaml",
         raw={"campaign": {"name": "retry-campaign"}},
         server={"runtime": {"runs_root": str(tmp_path / "runs")}},
         tasks=[task],

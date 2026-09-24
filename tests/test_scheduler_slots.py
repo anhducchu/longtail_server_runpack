@@ -2,8 +2,7 @@ from ltx.gpu import GPU, plan_slots
 
 
 def make_gpu(index, free_mb):
-    return GPU(index=index, name="mock", memory_total_mb=free_mb + 2048, memory_used_mb=2048,
-               memory_free_mb=free_mb, utilization_pct=0, temperature_c=0, power_w=0)
+    return GPU(index=index, name="mock", memory_free_mb=free_mb)
 
 
 def test_plan_slots_auto_small_gpu_gets_one_slot():

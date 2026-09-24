@@ -91,7 +91,7 @@ def load_dotenv(path: Path) -> None:
         os.environ.setdefault(key, value)
 
 
-def load_runtime_env(root: Path) -> Path | None:
+def load_runtime_env(root: Path) -> None:
     """Load an untracked environment file without ever persisting its values.
 
     An explicit LTX_ENV_FILE wins.  Otherwise the independent runpack only
@@ -102,11 +102,6 @@ def load_runtime_env(root: Path) -> Path | None:
     if explicit:
         path = Path(explicit).expanduser().resolve()
         load_dotenv(path)
-        return path if path.exists() else None
-    local_private = root / ".env.local"
-    load_dotenv(local_private)
-    local = root / ".env"
-    load_dotenv(local)
-    if os.environ.get("WANDB_API_KEY"):
-        return local_private if local_private.exists() else (local if local.exists() else None)
-    return local_private if local_private.exists() else (local if local.exists() else None)
+        return
+    load_dotenv(root / ".env.local")
+    load_dotenv(root / ".env")

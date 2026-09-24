@@ -252,46 +252,6 @@ def knn_radii(features: np.ndarray, k: int = 3, query_batch: int = 1024, device=
     return _knn_radii_torch(features, k, query_batch, device=target_device)
 
 
-def manifold_membership(query_features: np.ndarray, manifold_features: np.ndarray, manifold_radii: np.ndarray,
-                        query_batch: int = 1024, device="cuda") -> float:
-    """Fraction of query features lying in the (exact) k-NN manifold."""
-    torch = _torch(device)
-    target_device = torch.device(device)
-    if target_device.type == "cuda" and target_device.index is None:
-        target_device = torch.device("cuda", torch.cuda.current_device())
-    return _manifold_membership_torch(
-        query_features,
-        manifold_features,
-        manifold_radii,
-        query_batch=query_batch,
-        device=target_device,
-    )
-
-
-def _manifold_membership_torch(
-    query_features: np.ndarray,
-    manifold_features: np.ndarray,
-    manifold_radii: np.ndarray,
-    *,
-    query_batch: int,
-    device,
-) -> float:
-    """Exact single-direction manifold membership for a torch device."""
-    import torch
-
-    bank = torch.from_numpy(np.ascontiguousarray(manifold_features, dtype=np.float32)).to(device)
-    norm = bank.square().sum(dim=1)
-    radii2 = torch.from_numpy(np.ascontiguousarray(manifold_radii, dtype=np.float32)).to(device).square()
-    hits = 0
-    with torch.inference_mode():
-        for start in range(0, len(query_features), query_batch):
-            query = torch.from_numpy(
-                np.ascontiguousarray(query_features[start:start + query_batch], dtype=np.float32)
-            ).to(device)
-            hits += int((_dist2(query, bank, norm) <= radii2.unsqueeze(0)).any(dim=1).sum().item())
-    return hits / len(query_features)
-
-
 def _fused_cross_membership_torch(
     generated_features: np.ndarray,
     reference_features: np.ndarray,

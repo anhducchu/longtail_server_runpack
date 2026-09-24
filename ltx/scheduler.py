@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List
 
 from .config import LoadedCampaign
 from .gpu import plan_slots, query_gpus
@@ -34,7 +34,6 @@ class Scheduler:
         self.state.initialize(campaign.tasks, campaign_fingerprint=self.campaign_fingerprint)
         (self.campaign_dir / "campaign_fingerprint.txt").write_text(self.campaign_fingerprint + "\n", encoding="utf-8")
         self.processes: Dict[str, subprocess.Popen] = {}
-        self.gpu_for_task: Dict[str, int] = {}
         self.stop_requested = False
         self.launcher_logs: Dict[str, object] = {}
         self._current_slots: Dict[int, int] = {}
@@ -162,7 +161,6 @@ class Scheduler:
         )
         self.state.mark_started(task_id, proc.pid)
         self.processes[task_id] = proc
-        self.gpu_for_task[task_id] = gpu_id
         self.launcher_logs[task_id] = log
         self._last_launch_on_gpu[gpu_id] = time.time()
         print(f"[ltx] launched task={task_id} gpu={gpu_id} pid={proc.pid}", flush=True)
@@ -197,7 +195,6 @@ class Scheduler:
                 )
                 print(f"[ltx] worker state task={task_id} status={status} code={code}", flush=True)
             self.processes.pop(task_id, None)
-            self.gpu_for_task.pop(task_id, None)
             handle = self.launcher_logs.pop(task_id, None)
             if handle is not None:
                 handle.close()

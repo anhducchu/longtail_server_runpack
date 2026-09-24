@@ -35,7 +35,6 @@ class Task:
 @dataclass
 class LoadedCampaign:
     root: Path
-    config_path: Path
     raw: Dict[str, Any]
     server: Dict[str, Any]
     tasks: List[Task]
@@ -116,4 +115,4 @@ def load_campaign(config_path: str | Path) -> LoadedCampaign:
                 ))
 
     tasks.sort(key=lambda t: (-t.priority, t.seed, t.stage, t.method))
-    return LoadedCampaign(root=root, config_path=config_path, raw=raw, server=server, tasks=tasks)
+    return LoadedCampaign(root=root, raw=raw, server=server, tasks=tasks)

@@ -28,7 +28,6 @@ class CCUAAdapter(Adapter):
     runpack's shared evaluator, so every objective uses one metric contract.
     """
 
-    name = "ccua"
     DEFAULT_CHECKPOINT_INTERVAL_STEPS = 25_000
 
     @staticmethod
