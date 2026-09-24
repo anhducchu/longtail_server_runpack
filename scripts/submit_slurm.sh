@@ -10,5 +10,4 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
-source "${LTX_VENV:-$ROOT/.venv}/bin/activate"
-exec bash scripts/run_all.sh "${1:-configs/native_cifar100_if100.yaml}"
+exec bash scripts/run.sh "$@"

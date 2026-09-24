@@ -108,7 +108,6 @@ def test_ccua_adapter_dispatches_t2h_transfer_on_the_same_host(tmp_path):
 
     train = CCUAAdapter(ROOT).phases(task)[0].command
     assert "--transfer_x0" in train
-    assert "--transfer_mode=t2h" in train
     assert "--notransfer_x0" not in train
     assert "--nocbdm" in train
     assert "--ccua_al=0.0" in train
@@ -157,7 +156,6 @@ def test_ccua_adapter_resumes_an_explicit_full_state_checkpoint(tmp_path):
         method_config={
             **original.method_config,
             "resume_checkpoint": str(external),
-            "resume_mode": "full",
         },
     )
 

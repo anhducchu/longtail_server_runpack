@@ -4,13 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import numpy as np
-import random
 from tqdm import tqdm
-import ipdb
-from functools import partial
-
-from torchvision.utils import save_image
-import string
 
 from clr import uncond_info_nce
 
@@ -231,30 +225,11 @@ def extract(v, t, x_shape):
     return out.view([t.shape[0]] + [1] * (len(x_shape) - 1))
 
 
-def uniform_sampling(n, N, k):
-    return np.stack([np.random.randint(int(N/n)*i, int(N/n)*(i+1), k) for i in range(n)])
-
-
-def dist(X, Y):
-    sx = torch.sum(X**2, dim=1, keepdim=True)
-    sy = torch.sum(Y**2, dim=1, keepdim=True)
-    return torch.sqrt(-2 * torch.mm(X, Y.T) + sx + sy.T)
-
-
-def topk(y, all_y, K):
-    dist_y = dist(y, all_y)
-    return torch.topk(-dist_y, K, dim=1)[1]
-
-
 class GaussianDiffusionTrainer(nn.Module):
     def __init__(self,
-                 model, beta_1, beta_T, T, dataset,
+                 model, beta_1, beta_T, T,
                  num_class, cfg, weight,
-                 # Optional long-tail hyperparameters
-                 transfer_x0=True,
-                 mixing=False,transfer_mode='full',transfer_only_uncond=False,
-                 transfer_label=False,transfer_tr_tau=False,label_weight_tr = None,
-                 count=False, cut_time=-1,
+                 transfer_x0=False,
                  # CBDM hyperparameters
                  cbdm=False, cb_tau=1.0,
                  # CCUA hyperparameters
@@ -264,23 +239,10 @@ class GaussianDiffusionTrainer(nn.Module):
 
         self.model = model
         self.T = T
-        self.dataset = dataset
         self.num_class = num_class
         self.cfg = cfg
-        self.transfer_mode = transfer_mode
         self.weight = weight
-        # Optional long-tail hyperparameters
         self.transfer_x0 = transfer_x0
-        self.transfer_label=transfer_label
-        self.transfer_only_uncond = transfer_only_uncond
-        self.transfer_tr_tau = transfer_tr_tau
-        self.label_weight_tr = label_weight_tr
-        self.mixing = mixing
-        self.count = count
-        self.cut_time = cut_time
-        if self.count:
-            self.total_count = np.zeros(T)
-            self.transfer_count = np.zeros(T)
         # CBDM hyperparameters
         self.cbdm = cbdm
         self.cb_tau = cb_tau
@@ -307,8 +269,7 @@ class GaussianDiffusionTrainer(nn.Module):
         """
         # original codes
         t = torch.randint(self.T, size=(x_0.shape[0], ), device=x_0.device)
-        noise = torch.randn_like(x_0) 
-        ini_noise = noise
+        noise = torch.randn_like(x_0)
 
         x_t = (
             extract(self.sqrt_alphas_bar, t, x_0.shape) * x_0 +
@@ -324,10 +285,7 @@ class GaussianDiffusionTrainer(nn.Module):
         eps, latent = self.model(x_t, t, y=y_l, return_mid=True)
         if self.transfer_x0:
             cx_t = x_0 + extract(self.sigma_t, t, x_0.shape) * noise
-            if self.transfer_tr_tau:
-                noise = self.do_transfer_x0_with_y(x_t,cx_t,x_0,t,y_0,self.label_weight_tr)
-            else:
-                noise,_ = self.do_transfer_x0(x_t,cx_t,x_0,t,y_0,return_transfer_label=True)
+            noise = self.do_transfer_x0(x_t, cx_t, x_0, t, y_0)
 
         loss_ddpm = F.mse_loss(eps, noise, reduction='none')
         loss_cbdm = torch.zeros(eps.shape).to(x_t.device)
@@ -358,121 +316,27 @@ class GaussianDiffusionTrainer(nn.Module):
 
         return loss_ddpm, loss_cbdm, loss_ccua_ucl, loss_ccua_al
 
-    def do_transfer_x0(self,x_t,cx_t,x_0,t,y,return_transfer_label=False,mode=None,x_ref=None):
-        '''
-        new item for this function:
-        restrict the transfer direction from long to tail or tail to long.
-        '''
-        if mode is not None:
-            this_mode = mode
-        else:
-            this_mode = self.transfer_mode
+    def do_transfer_x0(self, x_t, cx_t, x_0, t, y):
+        """Transfer each target toward a nearby example from an equal-or-head class."""
         with torch.no_grad():
-            bs,ch,h,w = x_0.shape
-            ### here we should change the defination of the x_t
+            noisy = cx_t.reshape(len(cx_t), -1)
+            clean = x_0.reshape(len(x_0), -1)
+            log_weights = -torch.sum((noisy.unsqueeze(1) - clean) ** 2, dim=-1)
+            log_weights = log_weights / (2 * extract(self.sigma_tsq, t, log_weights.shape))
+            weights = torch.exp(log_weights - log_weights.max(dim=1, keepdim=True).values)
+            weights = weights / weights.sum(dim=1, keepdim=True)
 
-            x_t1 = cx_t.reshape(len(x_t),-1)
-            x_01 = x_0.reshape(len(x_0),-1)
-            '''
-            here we should decay the initial signal by sqrt{alpha_t}
-            '''
-            com_dis = x_t1.unsqueeze(1) - x_01
-            gt_distance = torch.sum((x_t1.unsqueeze(1) - x_01)**2,dim=[-1])
-            normalize_distance = 2*extract(self.sigma_tsq, t, gt_distance.shape)
+            candidate = torch.multinomial(weights, 1).squeeze(1)
+            original = torch.arange(x_0.shape[0], device=x_0.device)
+            frequencies = self.weight.squeeze().to(x_0.device)
+            old_frequency = frequencies.gather(0, y)
+            new_frequency = frequencies.gather(0, y[candidate])
+            selected = torch.where(new_frequency >= old_frequency, candidate, original)
 
-            #distance = - torch.max(gt_distance, dim=1, keepdim=True)[0] + gt_distance
-            gt_distance = - gt_distance / normalize_distance
-            distance = - torch.max(gt_distance, dim=1, keepdim=True)[0] + gt_distance
-            distance = torch.exp(distance)
-            # add y prior knowledge
-            # self-normalize the per-sample weight of reference batch
-            weights = distance / (torch.sum(distance, dim=1, keepdim=True))
-
-            new_ind = torch.multinomial(weights,1)
-            # here we wanted to record the transfer probability
-
-
-            new_ind = new_ind.squeeze(); ini_ind = torch.arange(x_0.shape[0]).cuda()
-            transfer_label = y[new_ind]
-            old_prob = self.weight.squeeze().cuda().gather(0,y)
-            new_prob = self.weight.squeeze().cuda().gather(0,transfer_label)
-            #here add the restriction item, just make judgement!
-            if this_mode == 't2h':
-                # ipdb.set_trace()
-                # here we implement the long to tail transfer
-                # firstly we should obtain the y label to the corresponding images
-                # initial label is the y 
-                if self.cut_time < 0:
-                    new_ind_f = torch.where(new_prob>=old_prob,new_ind,ini_ind)
-                else:
-                    new_ind_f1 = torch.where(new_prob>=old_prob ,new_ind,ini_ind)
-                    new_ind_f = torch.where(t < self.cut_time,new_ind_f1,ini_ind)
-            elif this_mode == 'h2t':
-                if self.cut_time < 0:
-                    new_ind_f = torch.where(new_prob<=old_prob,new_ind,ini_ind)
-                else:
-                    new_ind_f1 = torch.where(new_prob<=old_prob,new_ind,ini_ind)
-                    new_ind_f = torch.where(t < self.cut_time,new_ind_f1,ini_ind)
-            elif this_mode == 'full':
-                new_ind_f = new_ind
-            else:
-                raise NotImplementedError
-            x_n0 = x_0[new_ind_f]
-
-            new_epsilon =  (x_t - extract(self.sqrt_alphas_bar, t, x_0.shape)*x_n0) / extract(self.sqrt_one_minus_alphas_bar, t, x_0.shape)
-                        # then record the things 
-            if self.count:
-                reference = list(range(len(new_ind_f)))
-                for i in range(len(reference)):
-                    if new_ind_f[i] == reference[i]:
-                        self.total_count[t[i].item()] +=1
-                    else:
-                        self.total_count[t[i].item()] +=1
-                        self.transfer_count[t[i].item()]+=1
-
-            if return_transfer_label:
-                return new_epsilon,transfer_label
-            return new_epsilon
-
-    def do_transfer_x0_with_y(self,x_t,cx_t,x_0,t,y,weight_label):
-        '''
-        new item for this function:
-        restrict the transfer direction from long to tail or tail to long.
-        '''
-        with torch.no_grad():
-            bs,ch,h,w = x_0.shape
-            ### here we should change the defination of the x_t
-
-            x_t1 = cx_t.reshape(len(x_t),-1)
-            x_01 = x_0.reshape(len(x_0),-1)
-            '''
-            here we should decay the initial signal by sqrt{alpha_t}
-            '''
-            com_dis = x_t1.unsqueeze(1) - x_01
-            gt_distance = torch.sum((x_t1.unsqueeze(1) - x_01)**2,dim=[-1])
-            normalize_distance = 2*extract(self.sigma_tsq, t, gt_distance.shape)
-
-            #distance = - torch.max(gt_distance, dim=1, keepdim=True)[0] + gt_distance
-            gt_distance = - gt_distance / normalize_distance
-            distance = - torch.max(gt_distance, dim=1, keepdim=True)[0] + gt_distance
-            wl = weight_label.cuda()
-            reweight = torch.gather(wl[y],1,y.unsqueeze(0).repeat(bs,1))
-                         #distance = torch.exp(distance) * weight_label
-            distance = reweight * torch.exp(distance)#distance
-            # self-normalize the per-sample weight of reference batch
-            weights = distance / (torch.sum(distance, dim=1, keepdim=True))
-            new_ind = torch.multinomial(weights,1)
-            new_ind = new_ind.squeeze(); ini_ind = torch.arange(x_0.shape[0]).cuda()
-
-            new_ind_f = new_ind
-            x_n0 = x_0[new_ind_f]
-            new_epsilon =  (x_t - extract(self.sqrt_alphas_bar, t, x_0.shape)*x_n0) / extract(self.sqrt_one_minus_alphas_bar, t, x_0.shape)
-
-                        # then record the things 
-            return new_epsilon
-
-
-
+            transferred = x_0[selected]
+            return (
+                x_t - extract(self.sqrt_alphas_bar, t, x_0.shape) * transferred
+            ) / extract(self.sqrt_one_minus_alphas_bar, t, x_0.shape)
 
 
 class GaussianDiffusionSampler(nn.Module):

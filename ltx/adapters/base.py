@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List
+from typing import Dict, List
 
 from ..config import Task
 
@@ -41,16 +41,9 @@ class Phase:
     cwd: Path
     env: Dict[str, str] = field(default_factory=dict)
     skip_if_exists: List[Path] = field(default_factory=list)
-    # Optional content check for resumable artifacts.  Existence alone is not
-    # enough for a benchmark: a file from a different checkpoint/protocol can
-    # have the same name.  Keep this opt-in so legacy adapters retain their
-    # existing contracts while migrated adapters can fail closed.
-    skip_if_valid: Callable[[], bool] | None = None
 
 
 class Adapter:
-    name = "base"
-
     def __init__(self, root: Path):
         self.root = root
 
@@ -58,6 +51,6 @@ class Adapter:
         raise NotImplementedError
 
     def repo_dir(self, task: Task) -> Path:
-        directory = task.repository.get("directory", self.name)
+        directory = task.repository["directory"]
         path = Path(directory)
         return path if path.is_absolute() else Path(task.runtime["repos_root"]) / path

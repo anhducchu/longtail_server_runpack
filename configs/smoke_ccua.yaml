@@ -8,7 +8,6 @@ campaign:
   description: "20-step CCUA infrastructure test; not scientific evidence"
   server_config: configs/server.yaml
   paired_seeds: [0]
-  strict_preflight: false
 
 repositories:
   ccua:
@@ -33,8 +32,6 @@ shared_backbone:
     attn: [1]
     num_res_blocks: 2
     ema_decay: 0.9999
-    conditional: true
-    cfg: true
   eval:
     checkpoint_step: 20
     num_images: 64
@@ -46,7 +43,6 @@ shared_backbone:
     sample_method: ddpm
     ddim_skip_step: 100
     paper_metrics: false
-    standard_metrics: false
 
 stages:
   - name: smoke_ccua
@@ -61,9 +57,6 @@ stages:
       img_size: 32
       root: ${LTX_DATA_ROOT:-./data}
     methods:
-      - {name: ccua, ccua_al: 1.0, ccua_ucl: 1.0, brs: false}
+      - {name: ccua, objective: ccua, ccua_al: 1.0, ccua_ucl: 1.0}
     seeds: [0]
     tags: [smoke]
-
-aggregation:
-  enabled: false

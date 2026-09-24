@@ -40,7 +40,7 @@ def write_campaign(tmp_path: Path, *, require_groups: bool = False):
             "name": "c10_if100",
             "adapter": "native",
             "dataset": {"name": "cifar10lt_if100"},
-            "eval": {"require_many_medium_few": require_groups},
+            "eval": {"longtail_groups": "cm_three_way" if require_groups else "none"},
             "methods": [{"name": "ddpm"}],
             "seeds": [0, 1, 2],
         }],
@@ -72,12 +72,11 @@ def write_run(task, payload: dict, *, per_class: dict | None = None, success: bo
         )
 
 
-def test_native_report_accepts_flat_and_wrapped_metrics_and_aggregates_three_seeds(tmp_path, monkeypatch):
+def test_native_report_aggregates_canonical_metrics_across_three_seeds(tmp_path, monkeypatch):
     config, campaign = write_campaign(tmp_path)
     for task in campaign.tasks:
         metrics = native_metrics(task.seed)
-        payload = metrics if task.seed != 1 else {"metrics": metrics}
-        write_run(task, payload, per_class={"groups": {
+        write_run(task, {"metrics": metrics}, per_class={"groups": {
             group: {"FID": metrics["FID"] + offset}
             for group, offset in (("Many", 0.1), ("Medium", 0.2), ("Few", 0.3))
         }})
@@ -133,7 +132,7 @@ def test_native_report_requires_complete_many_medium_few_when_configured(tmp_pat
         groups = {"Many": {"FID": 10.0}, "Medium": {"FID": 11.0}, "Few": {"FID": 12.0}}
         if task.seed == 1:
             groups.pop("Few")
-        write_run(task, native_metrics(task.seed), per_class={"groups": groups})
+        write_run(task, {"metrics": native_metrics(task.seed)}, per_class={"groups": groups})
 
     output = tmp_path / "report"
     module = load_report_module()
@@ -145,3 +144,22 @@ def test_native_report_requires_complete_many_medium_few_when_configured(tmp_pat
     assert failed["status"] == "MISSING"
     assert failed["per_class_status"] == "incomplete"
     assert "missing groups: Few" in failed["failure_reason"]
+
+
+def test_native_report_accepts_the_seed_zero_baseline_config(tmp_path, monkeypatch):
+    config, campaign = write_campaign(tmp_path)
+    payload = json.loads(config.read_text(encoding="utf-8"))
+    payload["campaign"]["paired_seeds"] = [0]
+    payload["stages"][0]["seeds"] = [0]
+    config.write_text(json.dumps(payload), encoding="utf-8")
+    campaign = load_campaign(config)
+    write_run(campaign.tasks[0], {"metrics": native_metrics(0)})
+
+    output = tmp_path / "report"
+    module = load_report_module()
+    monkeypatch.setattr("sys.argv", ["report", "--config", str(config), "--output", str(output)])
+
+    assert module.main() == 0
+    summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
+    assert summary["aggregate"][0]["expected"] == 1
+    assert summary["aggregate"][0]["FID_std"] == 0.0

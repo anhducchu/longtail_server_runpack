@@ -6,6 +6,7 @@ import argparse
 import csv
 import json
 import math
+import statistics
 import sys
 import time
 from collections import defaultdict
@@ -16,7 +17,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from ltx.comparison import mean_std
 from ltx.config import LoadedCampaign, load_campaign
 from ltx.utils import load_runtime_env
 
@@ -36,13 +36,10 @@ def finite(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
-def _metric_mapping(payload: Any) -> dict[str, Any] | None:
-    if not isinstance(payload, dict):
-        return None
-    wrapped = payload.get("metrics")
-    if isinstance(wrapped, dict):
-        return wrapped
-    return payload
+def mean_std(values: list[float]) -> tuple[float | None, float | None]:
+    if not values:
+        return None, None
+    return statistics.fmean(values), statistics.stdev(values) if len(values) > 1 else 0.0
 
 
 def read_metrics(run_dir: Path) -> dict[str, float]:
@@ -52,8 +49,8 @@ def read_metrics(run_dir: Path) -> dict[str, float]:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, TypeError):
         return {}
-    values = _metric_mapping(payload)
-    if values is None:
+    values = payload.get("metrics") if isinstance(payload, dict) else None
+    if not isinstance(values, dict):
         return {}
     return {
         metric: value
@@ -71,14 +68,9 @@ def read_per_class_metrics(run_dir: Path) -> tuple[str, dict[str, float]]:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, TypeError):
         return "invalid", {}
-    values = _metric_mapping(payload)
-    if values is None:
+    groups = payload.get("groups") if isinstance(payload, dict) else None
+    if not isinstance(groups, dict):
         return "invalid", {}
-    groups = values.get("groups")
-    if not isinstance(groups, dict):
-        groups = payload.get("groups") if isinstance(payload, dict) else None
-    if not isinstance(groups, dict):
-        groups = values
     parsed = {}
     for group in GROUPS:
         group_value = groups.get(group)
@@ -88,34 +80,9 @@ def read_per_class_metrics(run_dir: Path) -> tuple[str, dict[str, float]]:
     return ("complete" if set(parsed) == set(GROUPS) else "incomplete"), parsed
 
 
-def _bool(value: Any) -> bool:
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
-
-
-def groups_required(campaign: LoadedCampaign, task_eval: dict[str, Any]) -> bool:
-    """Honor explicit native group requirements without treating an optional file as one."""
-    report = campaign.raw.get("report", {})
-    for source in (campaign.raw.get("fairness_contract", {}), report, task_eval):
-        if not isinstance(source, dict):
-            continue
-        for key in (
-            "require_many_medium_few", "require_longtail_groups", "require_per_class_metrics",
-            "require_per_class_groups", "require_tail_metrics", "require_groups",
-        ):
-            if key in source and _bool(source[key]):
-                return True
-        configured_groups = source.get("longtail_groups")
-        if configured_groups is True:
-            return True
-        if isinstance(configured_groups, (list, tuple, set)) and set(map(str, configured_groups)) == set(GROUPS):
-            return True
-        if str(configured_groups or "").strip().lower() in {
-            "many_medium_few", "cm_three_way", "native_three_way",
-        }:
-            return True
-    return False
+def groups_required(task_eval: dict[str, Any]) -> bool:
+    """Require group FIDs only for the native three-way long-tail contract."""
+    return task_eval.get("longtail_groups") == "cm_three_way"
 
 
 def _missing_metric_reason(metrics: dict[str, float]) -> str:
@@ -123,7 +90,7 @@ def _missing_metric_reason(metrics: dict[str, float]) -> str:
     return "" if not missing else f"missing metrics: {', '.join(missing)}"
 
 
-def _write_per_seed(output: Path, rows: list[dict[str, Any]]) -> list[str]:
+def _write_per_seed(output: Path, rows: list[dict[str, Any]]) -> None:
     columns = [
         "dataset", "method", "adapter", "seed", "status", "per_class_status",
         "failure_reason", *METRICS, "run_dir",
@@ -135,7 +102,6 @@ def _write_per_seed(output: Path, rows: list[dict[str, Any]]) -> list[str]:
             {column: row.get(column) for column in columns}
             for row in sorted(rows, key=lambda row: (row["dataset"], row["method"], row["seed"]))
         )
-    return columns
 
 
 def _aggregate(rows: list[dict[str, Any]], expected_seeds: list[int]) -> list[dict[str, Any]]:
@@ -223,7 +189,7 @@ def _write_results_log(output: Path, payload: dict[str, Any]) -> None:
             f"{row['dataset']} {row['method']} seed={row['seed']}: {row['status']} "
             f"(per_class={row['per_class_status']}; {reason})"
         )
-    lines.extend(["", "## Three-seed aggregate"])
+    lines.extend(["", "## Seed aggregate"])
     for row in aggregate:
         values = " | ".join(
             f"{metric}=" + (
@@ -283,8 +249,8 @@ def main() -> int:
     if campaign.raw.get("campaign", {}).get("protocol") != "native_cifar_v1":
         raise ValueError("report_native_cifar.py only accepts protocol=native_cifar_v1")
     expected_seeds = sorted(set(map(int, campaign.raw.get("campaign", {}).get("paired_seeds", []))))
-    if len(expected_seeds) != 3:
-        raise ValueError("native_cifar_v1 report requires exactly three distinct campaign.paired_seeds")
+    if not expected_seeds:
+        raise ValueError("native_cifar_v1 report requires at least one campaign.paired_seeds entry")
     if not campaign.tasks:
         raise ValueError("native_cifar_v1 report requires at least one task")
 
@@ -299,7 +265,7 @@ def main() -> int:
         run_dir = Path(task.run_dir)
         metrics = read_metrics(run_dir)
         per_class_status, per_class = read_per_class_metrics(run_dir)
-        require_groups = groups_required(campaign, task.eval)
+        require_groups = groups_required(task.eval)
         reasons = []
         if not (run_dir / "SUCCESS").is_file():
             reasons.append("missing SUCCESS")

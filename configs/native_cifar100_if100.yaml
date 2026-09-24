@@ -9,7 +9,6 @@ campaign:
   server_config: configs/server.yaml
   paired_seeds: [0, 1, 2]
   default_priority: 100
-  strict_preflight: true
 
 native_contract:
   dataset: cifar100lt_if100
@@ -33,7 +32,6 @@ repositories:
 
 native_train: &native_train
   total_steps: 300000
-  inclusive_final_step: true
   batch_size: 64
   lr: 0.0002
   warmup: 5000
@@ -51,9 +49,6 @@ native_train: &native_train
   attn: [1]
   num_res_blocks: 2
   ema_decay: 0.9999
-  conditional: true
-  cfg: true
-  amp: false
 
 native_eval: &native_eval
   checkpoint_step: 300000
@@ -69,7 +64,6 @@ native_eval: &native_eval
   paper_metrics: true
   fast_metrics: true
   feature_cache: true
-  legacy_prd_repeat: false
   fast_metrics_file: fast_metrics_preview.json
   fast_per_class_metrics_file: fast_per_class_fids.json
   metrics_file: metrics.native.json
@@ -96,8 +90,6 @@ stages:
     methods:
       - {name: ddpm, objective: ddpm}
       - {name: cbdm, objective: cbdm, cb_tau: 1.0}
-      - {name: ccua, objective: ccua, ccua_al: 1.0, ccua_ucl: 1.0, brs: false}
+      - {name: ccua, objective: ccua, ccua_al: 1.0, ccua_ucl: 1.0}
     seeds: [0, 1, 2]
     tags: [ccua-backbone, native-cifar-v1, cifar100lt, if100, baseline]
-
-aggregation: {enabled: false}

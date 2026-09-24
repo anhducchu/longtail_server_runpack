@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import List
 
 from .base import Adapter, Phase, resolve_inception_batch_size, resolve_num_workers
-from ..checkpoints import get_resume_spec, get_resume_step
+from ..checkpoints import get_resume_checkpoint, get_resume_step
 from ..config import Task
 
 
@@ -19,19 +19,13 @@ class CCUAAdapter(Adapter):
     flag defaults already match the unified backbone (ch=128, [1,2,2,2], attn[1],
     2 blocks, EMA 0.9999, T=1000). Its long-tailed CIFAR split is the same
     exponential ``ImbalanceCIFAR`` construction with ``rand_number=0``, so every
-    row of the table trains on an identical subset.  For the deferred
-    ImageNet-LT cell, ``data_type=imagenet_lt`` selects the bootstrap-installed
-    manifest loader; this is important because the released ImageFolder path
-    would otherwise train on all of ImageNet instead of the published LT split.
+    row of the table trains on an identical subset.
 
     The same adapter expresses the released DDPM, CBDM, T2H and CCUA baselines
     while retaining one U-Net, dataset, checkpoint, sampler and evaluator.
 
-    Sampling goes through ``main.py --sample`` rather than upstream
-    ``evaluate.py``: the latter imports CCUA's own FLD/CLIP/DINOv2 metric stack
-    at module scope, which this campaign replaces with one shared evaluator
-    anyway, and which would otherwise pull a network-fetched dependency chain
-    into every eval.
+    Sampling goes through ``main.py --sample`` and metrics go through the
+    runpack's shared evaluator, so every objective uses one metric contract.
     """
 
     name = "ccua"
@@ -106,7 +100,7 @@ class CCUAAdapter(Adapter):
             # Keep T2H as a separate objective while running it through this
             # campaign's single U-Net/data host.
             objective_flags = [
-                "--transfer_x0", "--transfer_mode=t2h",
+                "--transfer_x0",
                 "--nocbdm", "--ccua_al=0.0", "--ccua_ucl=0.0",
             ]
         else:  # objective == "ccua"
@@ -149,20 +143,8 @@ class CCUAAdapter(Adapter):
             f"--save_step={save_step}",
             f"--sample_step={train.get('sample_step', 100000)}",
             f"--num_workers={resolve_num_workers(train, 4)}",
-            "--conditional", "--cfg",
         ]
-        if task.dataset.get("data_type") == "imagenet_lt":
-            manifest = str(task.dataset.get("manifest", "")).strip()
-            if not manifest:
-                raise ValueError("ImageNet-LT requires dataset.manifest for the CCUA loader")
-            train_cmd.append(f"--train_manifest={manifest}")
         train_cmd += self._backbone_flags(train)
-        # The paper applies batch resampling only to ImageNet-LT and
-        # TinyImageNet-LT, explicitly not to CIFAR-LT, so it stays off unless a
-        # campaign asks for it.
-        if method_cfg.get("brs", False):
-            train_cmd += ["--brs", f"--brs_factor={method_cfg.get('brs_factor', 0.1)}"]
-        train_cmd += list(map(str, method_cfg.get("flags", [])))
         # Transfer is disabled for every native objective except the explicit
         # T2H row. Keep objective switches after optional flags so a campaign
         # cannot accidentally re-enable a sibling loss.
@@ -172,17 +154,10 @@ class CCUAAdapter(Adapter):
 
         # Upstream always iterates range(0, total_steps) and names checkpoints
         # step + ckpt_step, so a resume must be given the *remaining* budget or
-        # it would train the full budget a second time.  An explicit external
-        # checkpoint is allowed only as a full-state CCUA-DDPM checkpoint; an
-        # EMA-only cross-backbone transplant is rejected rather than silently
-        # becoming a fresh optimizer run.
-        explicit_resume, resume_mode = get_resume_spec(train, method_cfg)
+        # it would train the full budget a second time. Explicit external
+        # checkpoints always restore the full CCUA-DDPM training state.
+        explicit_resume = get_resume_checkpoint(train, method_cfg)
         if explicit_resume is not None:
-            if resume_mode != "full":
-                raise ValueError(
-                    "CCUA-DDPM supports only full-state external resume; "
-                    "EMA-only warm starts are not exact for this runner"
-                )
             resume_step = get_resume_step(train, method_cfg, explicit_resume)
             if resume_step >= target:
                 raise ValueError(
@@ -230,7 +205,7 @@ class CCUAAdapter(Adapter):
                 f"--beta_T={train.get('beta_T', 0.02)}",
                 f"--var_type={train.get('var_type', 'fixedlarge')}",
                 f"--dropout={train.get('dropout', 0.1)}",
-                "--conditional", f"--sample_output={samples}",
+                f"--sample_output={samples}",
             ]
             eval_core += self._backbone_flags(train)
             if evaluate.get("uniform_labels", False):
@@ -248,33 +223,6 @@ class CCUAAdapter(Adapter):
             metrics_file = str(evaluate.get("metrics_file", "metrics.paper.json"))
             if not single:
                 metrics_file = metrics_file.replace(".json", f"{suffix}.json")
-            if task.dataset.get("data_type") == "imagenet_lt":
-                reference_manifest = str(task.dataset.get("reference_manifest", "")).strip()
-                if not reference_manifest:
-                    raise ValueError("ImageNet-LT requires dataset.reference_manifest for metrics")
-                metric_repo = Path(task.runtime["repos_root"]) / str(
-                    task.method_config.get("metric_repo", "CCUA-DDPM")
-                )
-                phases.append(Phase(
-                    f"paper_metrics{suffix}",
-                    [
-                        py, str(self.root / "tools" / "evaluate_imagenet_lt.py"),
-                        "--repo", str(metric_repo),
-                        "--image-root", str(data_root),
-                        "--reference-manifest", reference_manifest,
-                        "--samples", str(samples), "--labels", str(labels),
-                        "--num-images", str(evaluate.get("num_images", 50000)),
-                        "--image-size", str(img_size),
-                        "--num-classes", str(num_class),
-                        "--batch-size", str(inception_batch),
-                        "--kid-repeats", str(evaluate.get("kid_repeats", 2)),
-                        "--seed", str(task.seed),
-                        "--output", str(run_dir / metrics_file),
-                    ],
-                    self.root,
-                    skip_if_exists=[run_dir / metrics_file],
-                ))
-                continue
             metric_base = [
                 py, str(self.root / "tools" / "evaluate_ccua.py"),
                 "--repo", str(repo),
@@ -334,8 +282,6 @@ class CCUAAdapter(Adapter):
                 "--mode", "detailed",
                 "--output", str(run_dir / metrics_file),
             ] + kid_args
-            if evaluate.get("legacy_prd_repeat", False):
-                metric_cmd.append("--legacy-prd-repeat")
             if per_class_file and single:
                 metric_cmd += ["--per-class-output", str(run_dir / per_class_file),
                                "--longtail-groups", str(evaluate.get("longtail_groups", "none"))]

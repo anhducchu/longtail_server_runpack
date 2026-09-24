@@ -11,7 +11,6 @@ from collections import Counter
 from pathlib import Path
 
 from .config import load_campaign
-from .checkpoints import RESUME_MODES
 from .preflight import run_preflight
 from .scheduler import Scheduler
 from .state import StateDB
@@ -38,8 +37,7 @@ def cmd_plan(args) -> int:
     campaign = load_campaign(args.config)
     print(f"Campaign: {campaign.raw['campaign']['name']} ({len(campaign.tasks)} tasks)")
     for task in campaign.tasks:
-        weight = task.method_config.get("weight_file") or task.method_config.get("generated_weight") or "-"
-        print(f"p={task.priority:3d} {task.id} {task.stage:32} {task.method:16} seed={task.seed} adapter={task.adapter} weight={weight}")
+        print(f"p={task.priority:3d} {task.id} {task.stage:32} {task.method:16} seed={task.seed} adapter={task.adapter}")
     return 0
 
 
@@ -65,19 +63,16 @@ def apply_resume_override(campaign, args) -> None:
     supported in the path for a per-task checkpoint layout.
     """
     checkpoint_template = getattr(args, "resume_checkpoint", None)
-    mode = getattr(args, "resume_mode", "full")
     resume_step = getattr(args, "resume_step", None)
     method = getattr(args, "resume_method", None)
     seed = getattr(args, "resume_seed", None)
     stage = getattr(args, "resume_stage", None)
     if not checkpoint_template:
-        if mode != "full" or resume_step is not None or method or seed is not None or stage:
+        if resume_step is not None or method or seed is not None or stage:
             raise ValueError("resume override options require --resume-checkpoint")
         return
     if not method:
-        raise ValueError("--resume-checkpoint requires --resume-method so another method cannot be warm-started accidentally")
-    if mode not in RESUME_MODES:
-        raise ValueError(f"--resume-mode must be one of: {', '.join(RESUME_MODES)}")
+        raise ValueError("--resume-checkpoint requires --resume-method so another method cannot be resumed accidentally")
     selected = [task for task in campaign.tasks
                 if task.method == method
                 and (seed is None or task.seed == seed)
@@ -120,7 +115,6 @@ def apply_resume_override(campaign, args) -> None:
             ) from exc
         cfg = dict(task.method_config)
         cfg["resume_checkpoint"] = str(Path(checkpoint).expanduser().resolve())
-        cfg["resume_mode"] = mode
         if resume_step is not None:
             cfg["resume_step"] = int(resume_step)
         updated.append(replace(task, method_config=cfg))
@@ -228,8 +222,6 @@ def main() -> None:
                      help="one seed to resume; omit only when the checkpoint path contains {seed}")
     run.add_argument("--resume-stage", default=None,
                      help="one campaign stage to resume when a method occurs in multiple stages")
-    run.add_argument("--resume-mode", choices=RESUME_MODES, default="full",
-                     help="full-state resume (default) or explicit ema_only warm start")
     run.add_argument("--resume-step", type=int, default=None,
                      help="completed update number when the checkpoint filename is not ckpt_<step>.pt")
     args = parser.parse_args()

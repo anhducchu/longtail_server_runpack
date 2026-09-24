@@ -50,13 +50,11 @@ def test_per_class_metrics_keeps_only_the_tail_summary(tmp_path):
     assert len(out) < 15
 
 
-def test_flat_metrics_json_still_flattens_directly(tmp_path):
-    """A flat metric payload still flattens directly."""
+def test_noncanonical_flat_metrics_json_is_ignored(tmp_path):
+    """Only the shared evaluator's wrapped JSON contract is publishable."""
     (tmp_path / "metrics.extra.json").write_text(json.dumps({
         "protocol": "additional baseline metric output",
         "FID": 9.5, "KID": {"mean": 0.02, "std": 0.001, "all": [0.02, 0.021]},
         "num_generated": 20000, "num_reference": 20000, "seed": 0,
     }))
-    out = collect_metrics(tmp_path)
-    assert out["generation/FID"] == 9.5
-    assert out["generation/KID"] == 0.02
+    assert collect_metrics(tmp_path) == {}

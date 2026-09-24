@@ -7,12 +7,10 @@ machine:
   # OOM retries when another tenant was using the device.
   min_free_gpu_memory_gb: 12
   poll_seconds: 20
-  heartbeat_seconds: 30
   # Native campaigns keep each 50k checkpoint (~0.6 GB) plus their 50k sample
   # array for lineage/resume auditing. Pause launching rather than fill the
   # disk and lose a run mid-training; 0 disables.
   disk_stop_free_gb: 20
-  shutdown_grace_seconds: 45
   # How many tasks may share one GPU. "auto" divides each GPU's free memory
   # (minus gpu_memory_headroom_gb) by task_gpu_memory_gb, capped at
   # max_tasks_per_gpu. Override with an integer to pin every GPU to that count.
@@ -47,11 +45,7 @@ runtime:
   # applies the same thinning inside the child process.
   progress_log_every_seconds: 30
   tqdm_min_interval_seconds: 10
-  log_tensorboard_every_seconds: 60
-  upload_sample_grids: true
-  upload_final_checkpoint: false
   upload_stdout_artifact: true
-  fail_on_dirty_repo: false
 
 retry:
   max_attempts: 2

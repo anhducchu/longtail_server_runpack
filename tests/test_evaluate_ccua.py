@@ -74,7 +74,6 @@ def _args(tmp_path: Path, *, mode: str, headline_output: Path | None = None) -> 
         headline_output=headline_output,
         samples=None,
         generated_features_cache=None,
-        legacy_prd_repeat=False,
         metric_backend="canonical",
         inception_batch_size=16,
         vgg_batch_size=128,

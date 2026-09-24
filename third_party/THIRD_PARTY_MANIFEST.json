@@ -14,11 +14,13 @@
       "directory": "CCUA-DDPM",
       "origin": "https://github.com/C-Fun/Contrastive-Conditional-Unconditional-Alignment-for-Long-tailed-Diffusion-Model.git",
       "subtree": "CCUA-DDPM/DDPM",
-      "excluded_from_vendoring": [
-        "utils/fld"
+      "local_changes": [
+        "baseline-only CIFAR-100-LT entrypoint and dataset",
+        "atomic periodic checkpoints and full-state resume",
+        "explicit sample-array export with class-uniform labels",
+        "unused upstream evaluators, datasets, and model variants pruned"
       ],
       "operational_patches": [
-        "patches/apply_ccua_imagenet_lt.py",
         "patches/apply_ccua_sample_export.py"
       ]
     }

@@ -34,7 +34,5 @@ dependencies:
       - absl-py==2.1.0
       - tensorboardX==2.6.2.2
       - wandb==0.19.6
-      - wandb-workspaces==0.1.9
       - psutil==6.1.1
-      - jsonschema==4.23.0
       - pytest==8.3.4

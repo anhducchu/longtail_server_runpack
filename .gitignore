@@ -3,6 +3,12 @@
 !.env.example
 .venv/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage*
+htmlcov/
+build/
+dist/
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -26,6 +32,7 @@ checkpoints/
 *.npy
 *.npz
 *.log
+slurm-*.out
 *.csv
 *.png
 *_DIAGNOSTICS.json

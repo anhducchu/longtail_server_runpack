@@ -265,7 +265,6 @@ def _check_native_cifar_contract(
         )
     if repo_root is not None:
         source = repo_root / directory / "main.py"
-        marker = repo_root / directory / ".ltx_ccua_sample_export_v1"
         try:
             text = source.read_text(encoding="utf-8")
         except OSError as exc:
@@ -273,16 +272,14 @@ def _check_native_cifar_contract(
         else:
             required = (
                 "GaussianDiffusionSamplerDDIM",
-                "flags.DEFINE_bool('sample'",
+                'flags.DEFINE_bool("sample"',
+                'flags.DEFINE_string("sample_output"',
+                'flags.DEFINE_bool("uniform_labels"',
                 "if FLAGS.sample:",
             )
             missing = [item for item in required if item not in text]
             if missing:
                 repository_errors.append(f"official sample entrypoint missing {missing}")
-        if not marker.is_file():
-            repository_errors.append(
-                "sample-output/uniform-label patch marker missing; run bootstrap"
-            )
     checks.append(Check(
         "ERROR" if repository_errors else "PASS",
         "native-cifar-repository",
@@ -367,15 +364,22 @@ def _check_native_cifar_contract(
 def run_preflight(campaign: LoadedCampaign) -> List[Check]:
     checks: List[Check] = []
     gpus = query_gpus()
+    required_gpu_gb = float(
+        campaign.server.get("machine", {}).get("min_free_gpu_memory_gb", 0)
+    )
+    eligible_gpus = [
+        gpu for gpu in gpus if gpu.memory_free_mb / 1024 >= required_gpu_gb
+    ]
     checks.append(Check(
-        "PASS" if gpus else "ERROR",
+        "PASS" if eligible_gpus else "ERROR",
         "gpu",
         ", ".join(
             f"{gpu.index}:{gpu.name} {gpu.memory_free_mb / 1024:.1f}GB free"
             for gpu in gpus
         )
+        + f"; required={required_gpu_gb:.1f}GB"
         if gpus
-        else "nvidia-smi returned no GPUs",
+        else f"nvidia-smi returned no GPUs; required={required_gpu_gb:.1f}GB",
     ))
 
     runs_root = Path(campaign.server["runtime"]["runs_root"])

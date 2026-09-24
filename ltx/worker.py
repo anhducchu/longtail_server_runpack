@@ -104,7 +104,7 @@ _METRIC_GOALS = {
 def wandb_config(task: Task) -> Dict[str, object]:
     """The knobs that actually identify and constrain this run.
 
-    ``task.to_dict()`` is a 69-entry dump that buries the protocol under
+    ``task.to_dict()`` is a large dump that buries the protocol under
     absolute paths, retry policy, and the runner's own W&B settings. Config is
     what a reader checks to confirm two rows are comparable, so keep exactly
     the identity and the fairness contract.
@@ -133,30 +133,18 @@ def wandb_config(task: Task) -> Dict[str, object]:
             config[f"eval/{key}"] = evaluate[key]
     config.setdefault("eval/inception_batch_size", int(evaluate.get("inception_batch_size", 16)))
     for key in (
-        "objective", "cb_tau", "ccua_al", "ccua_ucl", "data_sampling",
-        "cfg_dropout", "uncertainty", "donor_pool", "lambda_trust",
-        "lambda_explore", "cross_class_donors", "aux_batch_size",
-        "controller_width", "gamma_init", "explore_strength",
-        "max_explore_ratio", "lambda_reverse_kl", "self_logit_init",
-        "extra_variance_init", "max_variance_ratio",
-        "lambda_total", "posterior_temperature", "explore_temperature",
-        "benefit_margin",
-        "null_logit_init", "margin", "t_min", "t_max", "endpoint_clip",
-        "tau", "lambda",
+        "objective", "cb_tau", "ccua_al", "ccua_ucl",
+        "guidance_scale", "guidance_scales",
     ):
         if key in task.method_config:
             config[f"objective/{key}"] = task.method_config[key]
     if task.method_config.get("resume_checkpoint"):
         config["resume/checkpoint"] = str(task.method_config["resume_checkpoint"])
-        config["resume/mode"] = str(task.method_config.get("resume_mode", "full"))
         if task.method_config.get("resume_step"):
             config["resume/step"] = task.method_config["resume_step"]
     for key in ("checkpoint_interval_steps", "auto_resume_max_attempts", "auto_resume_exit_codes"):
         if key in task.retry:
             config[f"reliability/{key}"] = task.retry[key]
-    flags = task.method_config.get("flags")
-    if flags:
-        config["method_flags"] = " ".join(map(str, flags))
     return config
 
 
@@ -256,9 +244,8 @@ _OUTPUT_SEGMENT = re.compile(rb"[^\r\n]*[\r\n]")
 
 def run_phase(phase, env: Dict[str, str], log_path: Path, state: StateDB, task_id: str, wb_run,
               progress_seconds: float = 30.0) -> int:
-    skip_if_valid = getattr(phase, "skip_if_valid", None)
     outputs_exist = phase.skip_if_exists and all(path.exists() for path in phase.skip_if_exists)
-    if outputs_exist and (skip_if_valid is None or skip_if_valid()):
+    if outputs_exist:
         print(f"[ltx] skip phase={phase.name}; outputs exist", flush=True)
         return 0
     phase_env = os.environ.copy()

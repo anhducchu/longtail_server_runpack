@@ -9,14 +9,19 @@ VENV="${LTX_VENV:-$ROOT/.venv}"
 REPOS_ROOT="${LTX_REPOS_ROOT:-$ROOT/third_party}"
 INSTALL_REPO_DEPS="${LTX_INSTALL_REPO_DEPS:-1}"
 
-# Always converge the local venv to the interpreter selected by run_server.
+# Always converge the local venv to the interpreter selected by run.sh.
 # This avoids retaining a stale venv after the pinned conda environment changes.
 "$PYTHON_BIN" -m venv --upgrade --system-site-packages "$VENV"
 source "$VENV/bin/activate"
 # Keep compatibility with the CUDA PyTorch builds commonly preinstalled on
 # research servers (torch 2.12 currently requires setuptools < 82).
 python -m pip install --upgrade "pip<26" "setuptools<82" wheel
-python -m pip install -e .
+if [[ "$INSTALL_REPO_DEPS" == "1" ]]; then
+  # Preserve the server's CUDA/PyTorch installation; those packages are owned
+  # by environment.yml rather than pip.
+  python -m pip install -r "$ROOT/requirements.runpack.txt"
+fi
+python -m pip install --no-deps -e .
 
 if [[ ! -f "$REPOS_ROOT/THIRD_PARTY_MANIFEST.json" ]]; then
   echo "[bootstrap] missing third_party/THIRD_PARTY_MANIFEST.json; refusing an unverifiable vendor tree." >&2
@@ -31,16 +36,12 @@ if [[ ! -d "$CCUA_ROOT" || ! -f "$CCUA_ROOT/main.py" || ! -f "$CCUA_ROOT/model/m
   echo "[bootstrap] missing active CCUA-DDPM source at $CCUA_ROOT." >&2
   exit 2
 fi
-python third_party/patches/apply_ccua_imagenet_lt.py "$CCUA_ROOT"
-python third_party/patches/apply_ccua_sample_export.py "$CCUA_ROOT"
+if [[ ! -f "$CCUA_ROOT/.ltx_ccua_sample_export_v1" ]]; then
+  echo "[bootstrap] vendored CCUA sample-export patch is missing; restore the tracked vendor tree." >&2
+  exit 2
+fi
 mkdir -p "$CCUA_ROOT/stats"
 echo "[bootstrap] CCUA-DDPM-only backbone ready; legacy source trees are not required"
-
-if [[ "$INSTALL_REPO_DEPS" == "1" ]]; then
-  # Preserve the server's CUDA/PyTorch installation.  The 2021 CBDM source
-  # lists obsolete TensorFlow/PyTorch pins which are not used by this runner.
-  python -m pip install -r "$ROOT/requirements.runpack.txt"
-fi
 
 # Authenticate once so every worker and the final report share one identity
 # instead of relying on ambient env vars. Never echo the key itself.
@@ -64,4 +65,4 @@ PY
 mkdir -p "${LTX_RUNS_ROOT:-$ROOT/runs}" "${LTX_DATA_ROOT:-$ROOT/data}" "$ROOT/wandb"
 
 echo
-printf 'Bootstrap complete. The runner reads this runpack\047s .env.local (or $LTX_ENV_FILE).\n  source %q\n  python -m ltx.cli preflight --config configs/native_cifar100_if100.yaml\n  bash scripts/run_server_c100.sh\n' "$VENV/bin/activate"
+printf 'Bootstrap complete. The runner reads this runpack\047s .env.local.\n  source %q\n  python -m ltx.cli preflight --config configs/native_cifar100_if100.yaml\n  bash scripts/run.sh\n' "$VENV/bin/activate"

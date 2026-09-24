@@ -4,7 +4,7 @@
 ``--mode headline`` is the early-result protocol: it reports the common
 Inception FID/IS/PRD columns and deterministic KID, but deliberately omits
 the exact VGG16 50k-by-50k improved-PRD and every per-class FID. The default
-``detailed`` mode keeps the legacy final metric set; it writes an atomic
+``detailed`` mode writes the canonical final metric set and an atomic
 headline snapshot before starting those optional expensive calculations.
 ``--mode quick`` accepts a smaller class-uniform smoke sample and reports only
 the common fast metrics; its values are not for paper reporting or direct
@@ -36,77 +36,6 @@ from ltx.paper_metrics import improved_prd_vgg16_k3, polynomial_mmd_kid, polynom
 _IS_SPLITS = 10
 
 
-def _sample_provenance_path(samples: Path) -> Path:
-    """Return the sidecar written by the active CCUA sampler."""
-    return samples.with_suffix(".provenance.json")
-
-
-def _load_expected_sample_provenance(args, samples: Path) -> dict | None:
-    """Validate the sample/checkpoint identity when called by the common host.
-
-    Native paper evaluators do not pass the ``expected_*`` flags and therefore
-    retain their simple input contract. A common-host caller may pass them;
-    missing or mismatched sidecars then fail before an expensive Inception
-    pass can publish a number for the wrong checkpoint.
-    """
-    expected = {
-        "host_revision": getattr(args, "expected_host_revision", None),
-        "checkpoint_schema": getattr(args, "expected_checkpoint_schema", None),
-        "objective": getattr(args, "expected_objective", None),
-        "checkpoint_step": getattr(args, "expected_checkpoint_step", None),
-        "num_images": getattr(args, "expected_num_images", None),
-        "sample_method": getattr(args, "expected_sample_method", None),
-        "sampler_method": getattr(args, "expected_sampler_method", None),
-        "ddim_skip_step": getattr(args, "expected_ddim_skip_step", None),
-        "omega": getattr(args, "expected_omega", None),
-        "seed": getattr(args, "expected_seed", None),
-        "artifact_namespace": getattr(args, "expected_artifact_namespace", None),
-        "T": getattr(args, "expected_T", None),
-        "beta_1": getattr(args, "expected_beta_1", None),
-        "beta_T": getattr(args, "expected_beta_T", None),
-        "var_type": getattr(args, "expected_var_type", None),
-        "img_size": getattr(args, "expected_img_size", None),
-        "num_class": getattr(args, "expected_num_class", None),
-        "uniform_labels": getattr(args, "expected_uniform_labels", None),
-    }
-    expected = {key: value for key, value in expected.items() if value is not None}
-    if not expected:
-        return None
-    path = _sample_provenance_path(samples)
-    try:
-        actual = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError) as exc:
-        raise ValueError(
-            f"common evaluation requires a valid sampler provenance sidecar: {path}"
-        ) from exc
-    if not isinstance(actual, dict):
-        raise ValueError(f"sampler provenance must be a JSON object: {path}")
-    mismatches = []
-    for key, wanted in expected.items():
-        got = actual.get(key)
-        if isinstance(wanted, float):
-            try:
-                equal = bool(np.isclose(float(got), wanted, rtol=0.0, atol=1e-12))
-            except (TypeError, ValueError):
-                equal = False
-        else:
-            equal = got == wanted
-        if not equal:
-            mismatches.append(f"{key}={got!r} (expected {wanted!r})")
-    if mismatches:
-        raise ValueError(
-            f"sample provenance mismatch for {samples}: " + "; ".join(mismatches)
-        )
-    return actual
-
-
-def _metric_provenance(args) -> dict | None:
-    sample = getattr(args, "sample_provenance", None)
-    if sample is None:
-        return None
-    return {"metric_host": "common_cifar_metrics_v2", "sample": sample}
-
-
 def _atomic_write_json(path: Path, payload: dict) -> None:
     """Write JSON without exposing a partially written metric artifact."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -131,8 +60,8 @@ def _feature_cache_signature(samples: Path) -> dict:
 
     The cache is intentionally tied to path, byte size, and mtime.  A full
     SHA-256 over a 50k image array would make a fast re-evaluation needlessly
-    expensive; the sampler already writes a provenance sidecar for the
-    checkpoint/protocol identity.
+    expensive. The run directory and task-resolved metadata retain checkpoint
+    and protocol identity.
     """
     resolved = Path(samples).resolve()
     stat = resolved.stat()
@@ -474,14 +403,8 @@ def _fid_gpu(features: np.ndarray, reference: np.ndarray) -> float:
 
 
 def _standard_prd_scores(generated_features: np.ndarray, reference_features: np.ndarray,
-                         nclass: int, *, legacy_repeat: bool = False) -> tuple[float, float]:
-    """Run the existing 10-run Inception PRD protocol on reused activations.
-
-    The released helper accidentally invoked the stochastic 10-run estimator
-    twice and returned its second result. Detailed mode retains that sequence
-    for backward-compatible values; explicit headline mode performs one
-    estimator call because it is an intentionally new fast protocol.
-    """
+                         nclass: int) -> tuple[float, float]:
+    """Run the canonical 10-run Inception PRD protocol on reused activations."""
     from score.prd_score import compute_prd_from_embedding, prd_to_max_f_beta_pair
 
     prd_data = compute_prd_from_embedding(
@@ -492,15 +415,6 @@ def _standard_prd_scores(generated_features: np.ndarray, reference_features: np.
         num_runs=10,
         enforce_balance=True,
     )
-    if legacy_repeat:
-        prd_data = compute_prd_from_embedding(
-            eval_data=generated_features,
-            ref_data=reference_features,
-            num_clusters=nclass * 20,
-            num_angles=1001,
-            num_runs=10,
-            enforce_balance=True,
-        )
     f_8, f_1_8 = prd_to_max_f_beta_pair(prd_data[0], prd_data[1], beta=8)
     return float(f_8), float(f_1_8)
 
@@ -606,7 +520,6 @@ def _collect_headline_metrics(args, images: np.ndarray, nclass: int, dataset: st
         generated_features,
         prd_reference_features,
         nclass,
-        legacy_repeat=getattr(args, "legacy_prd_repeat", False),
     )
     metrics = {
         "FID": float(fid),
@@ -701,9 +614,6 @@ def _evaluate_improved_pr_only(
         "protocol": protocol,
         "label_histogram": counts.tolist(),
     }
-    metric_provenance = _metric_provenance(args)
-    if metric_provenance is not None:
-        payload["provenance"] = metric_provenance
     _atomic_write_json(args.output, payload)
     return payload
 
@@ -776,7 +686,6 @@ def _per_class_payload(args, generated_features: np.ndarray, reference_features:
         },
         "per_class": per_class,
         "groups": groups,
-        **({"provenance": _metric_provenance(args)} if _metric_provenance(args) is not None else {}),
     }
 
 
@@ -814,9 +723,6 @@ def _evaluate(args, images: np.ndarray, labels: np.ndarray, counts: np.ndarray, 
             "protocol": protocol,
             "label_histogram": counts.tolist(),
         }
-        metric_provenance = _metric_provenance(args)
-        if metric_provenance is not None:
-            payload["provenance"] = metric_provenance
         _atomic_write_json(args.output, payload)
         return payload
 
@@ -843,9 +749,6 @@ def _evaluate(args, images: np.ndarray, labels: np.ndarray, counts: np.ndarray, 
         "protocol": _headline_protocol(protocol, mode=headline_mode),
         "label_histogram": counts.tolist(),
     }
-    metric_provenance = _metric_provenance(args)
-    if metric_provenance is not None:
-        headline_payload["provenance"] = metric_provenance
     # The primary path becomes available as a valid headline report immediately;
     # detailed mode atomically replaces it only after all optional work succeeds.
     _atomic_write_json(args.output, headline_payload)
@@ -880,8 +783,6 @@ def _evaluate(args, images: np.ndarray, labels: np.ndarray, counts: np.ndarray, 
             _per_class_payload(args, generated_features, reference_features, labels, nclass, dataset),
         )
     payload = {"metrics": metrics, "protocol": protocol, "label_histogram": counts.tolist()}
-    if metric_provenance is not None:
-        payload["provenance"] = metric_provenance
     _atomic_write_json(args.output, payload)
     return payload
 
@@ -917,10 +818,6 @@ def main() -> None:
         "--generated-features-cache", type=Path, default=None,
         help="optional atomic .npz cache for generated 2048-d Inception features and IS",
     )
-    parser.add_argument(
-        "--legacy-prd-repeat", action="store_true",
-        help="repeat the stochastic 10-run PRD call for historical compatibility; disabled by default",
-    )
     parser.add_argument("--vgg-batch-size", type=int, default=128)
     parser.add_argument("--knn-query-batch", type=int, default=1024)
     parser.add_argument("--kid", action="store_true", help="append deterministic cubic-kernel KID in detailed mode (always included in headline and quick modes)")
@@ -930,24 +827,6 @@ def main() -> None:
     parser.add_argument("--per-class-output", type=Path, default=None,
                         help="optional JSON with per-class FID and Many/Medium/Few FIDs (detailed and quick modes)")
     parser.add_argument("--longtail-groups", choices=("none", "cm_three_way"), default="none")
-    parser.add_argument("--expected-host-revision", default=None)
-    parser.add_argument("--expected-checkpoint-schema", type=int, default=None)
-    parser.add_argument("--expected-objective", default=None)
-    parser.add_argument("--expected-checkpoint-step", type=int, default=None)
-    parser.add_argument("--expected-num-images", type=int, default=None)
-    parser.add_argument("--expected-sample-method", default=None)
-    parser.add_argument("--expected-sampler-method", default=None)
-    parser.add_argument("--expected-ddim-skip-step", type=int, default=None)
-    parser.add_argument("--expected-omega", type=float, default=None)
-    parser.add_argument("--expected-seed", type=int, default=None)
-    parser.add_argument("--expected-artifact-namespace", default=None)
-    parser.add_argument("--expected-T", type=int, default=None)
-    parser.add_argument("--expected-beta-1", type=float, default=None)
-    parser.add_argument("--expected-beta-T", type=float, default=None)
-    parser.add_argument("--expected-var-type", default=None)
-    parser.add_argument("--expected-img-size", type=int, default=None)
-    parser.add_argument("--expected-num-class", type=int, default=None)
-    parser.add_argument("--expected-uniform-labels", action="store_true", default=None)
     args = parser.parse_args()
     if args.inception_batch_size <= 0:
         parser.error("--inception-batch-size must be positive")
@@ -967,7 +846,6 @@ def main() -> None:
     args.samples = Path(args.samples).resolve()
     if args.generated_features_cache is not None:
         args.generated_features_cache = Path(args.generated_features_cache).resolve()
-    args.sample_provenance = _load_expected_sample_provenance(args, args.samples)
     images = np.load(args.samples, mmap_mode="r")
     labels = np.load(args.labels, mmap_mode="r")
     nclass = 100 if args.data_type == "cifar100lt" else 10

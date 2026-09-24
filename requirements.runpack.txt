@@ -1,7 +1,5 @@
-# Runtime dependencies for the CCUA-backed runpack on a modern CUDA/PyTorch host.
-# Do not install the obsolete third_party requirements verbatim: CBDM's 2021
-# file pins TensorFlow 2.4 and PyTorch 1.7, which would replace a server's
-# working CUDA build despite neither being imported by the training path.
+# Runtime and verification dependencies for the baseline runpack. PyTorch and
+# torchvision remain owned by the CUDA/conda environment.
 absl-py==2.1.0
 scipy==1.13.1
 scikit-learn==1.5.2
@@ -10,9 +8,7 @@ tqdm==4.67.1
 Pillow==10.4.0
 PyYAML==6.0.2
 psutil==6.1.1
-jsonschema==4.23.0
 wandb==0.19.6
-wandb-workspaces==0.1.9
 pytest==8.3.4
 # Hard, unconditionally-imported dependencies of the active CCUA host.
 einops==0.8.0                    # CCUA-DDPM/clr.py (contrastive loss)

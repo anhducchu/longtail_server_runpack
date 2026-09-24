@@ -1,104 +1,118 @@
 # Long-tail diffusion baseline runpack
 
-This repository runs every supported comparison through one pinned
-`third_party/CCUA-DDPM/` runtime. DDPM, CBDM, T2H, and CCUA therefore share the
-same dataset split, U-Net, optimizer, checkpoint format, sampler, and evaluator.
+This repository runs DDPM, CBDM, T2H, and CCUA through one pinned
+`third_party/CCUA-DDPM/` host. The four objectives share the CIFAR-100-LT
+split, U-Net, optimizer, checkpoint format, sampler, and evaluator. Any other
+objective or runtime host is rejected before launch.
 
-Research work that is not part of this baseline contract is preserved on the
-local branch `archive/research-wip-20260922`.
+Archived research code is preserved on the local branch
+`archive/research-wip-20260922`; it is not part of the `main` runtime.
 
-## Repository layout
+## What is tracked
 
 | Path | Purpose |
 | --- | --- |
-| `configs/` | Baseline campaign and server definitions |
-| `ltx/` | Planning, preflight, scheduling, resume, and command generation |
-| `third_party/CCUA-DDPM/` | The only training and sampling backbone |
-| `tools/evaluate_ccua.py` | Shared CIFAR evaluator |
-| `scripts/` | Bootstrap, launch, status, resume, stop, and Slurm entrypoints |
-| `tests/` | Baseline unit and regression tests |
+| `configs/` | Main 9-task campaign, seed-0 T2H comparison, smoke, and server policy |
+| `ltx/` | Planning, preflight, scheduling, retries, and W&B collection |
+| `third_party/CCUA-DDPM/` | Baseline-only CIFAR-100 trainer, sampler, and metric host |
+| `tools/` | Metric-asset preparation, shared evaluation, and final report |
+| `scripts/` | One local runner, bootstrap, and Slurm entrypoint |
+| `tests/` | Baseline unit and regression suite |
 
-`data/`, `runs/`, `outputs/`, W&B files, metric arrays, checkpoints, and logs
-are local artifacts. They are intentionally ignored by Git.
+Data, checkpoints, generated arrays, logs, reports, W&B state, and metric
+arrays remain local and are ignored by Git. Only metric manifests are tracked.
 
-## Supported objectives
-
-| Objective | Runtime behavior |
-| --- | --- |
-| DDPM | Native epsilon-prediction loss |
-| CBDM | Native class-balancing loss with `cb_tau` |
-| T2H | Native transfer target on the shared CCUA host |
-| CCUA | Native alignment and unconditional contrastive losses |
-
-Any other objective is rejected by both the adapter and preflight checks.
-
-## Locked CIFAR-100-LT protocol
+## Locked protocol
 
 - CIFAR-100-LT IF100, 32×32, split seed 0;
 - 300,000 updates, batch 64, learning rate `2e-4`, T=1000, EMA `0.9999`;
-- 50,000 class-uniform generated labels;
-- DDIM-100 with guidance scale 1.5;
-- shared FID, KID, IS, precision/recall, and Many/Medium/Few evaluation.
+- 50,000 class-uniform samples;
+- DDIM-100, guidance scale 1.5;
+- shared FID, KID, IS, F8/F1/8, improved precision/recall, and
+  Many/Medium/Few FID.
 
-The main campaign contains DDPM/CBDM/CCUA × seeds 0, 1, and 2. The seed-0
-comparison config also contains T2H.
+The main config is DDPM/CBDM/CCUA × seeds 0, 1, and 2 (9 tasks). The separate
+seed-0 config runs DDPM/CBDM/T2H on the same host.
 
-## Environment
+## Configure and run
 
-Create `.env.local` from `.env.example` and keep it local. It is never tracked.
-On the server:
+`.env.example` is the only tracked environment contract:
 
 ```bash
-cd /home/nvidia-lab/ai4life/annd/respi/longtail_server_runpack
-source .venv/bin/activate
-export LTX_REPOS_ROOT="$PWD/third_party"
-export LTX_DATA_ROOT="$PWD/data"
-export LTX_RUNS_ROOT="/home/nvidia-lab/data_mount/longtail_server_runpack/runs"
-export LTX_METRICS_ROOT="$PWD/third_party/CCUA-DDPM/stats"
+cp .env.example .env.local
+# Fill WANDB_API_KEY, storage roots, and optional GPU-packing overrides.
 ```
 
-Bootstrap and validate without launching training:
+Plan and preflight without launching:
 
 ```bash
 bash scripts/bootstrap.sh
+source .venv/bin/activate
 python -m ltx.cli plan --config configs/native_cifar100_if100.yaml
 python -m ltx.cli preflight --config configs/native_cifar100_if100.yaml
 ```
 
-Launch the main campaign:
+Run the main campaign or the seed-0 T2H comparison:
 
 ```bash
-bash scripts/run_native_cifar_c100.sh
+bash scripts/run.sh
+bash scripts/run.sh configs/native_cifar100_if100_seed0.yaml
 ```
 
-Launch the smaller baseline/T2H seed-0 comparison:
+`scripts/run.sh` selects or creates the CUDA environment, bootstraps the local
+venv, prepares missing CIFAR metric assets, launches the scheduler, and writes
+the report. CLI flags after the optional config path pass through to `ltx run`:
 
 ```bash
-bash scripts/run_ccua_ddpm_cbdm.sh \
-  configs/native_cifar100_if100_ddpm_cbdm_seed0.yaml
+bash scripts/run.sh --gpus 0,1,2,3 --per-gpu auto --jobs auto
 ```
 
-## Recovery and evaluation
+For Slurm:
 
-Checkpoints are atomically replaced and their interval is capped by the server
-retry policy. If a worker is killed before writing terminal state, the
-scheduler records the exit and retries from the newest complete checkpoint.
+```bash
+sbatch scripts/submit_slurm.sh
+sbatch scripts/submit_slurm.sh configs/native_cifar100_if100_seed0.yaml
+```
+
+## Operate and recover
+
+The CLI replaces per-command shell wrappers:
 
 ```bash
 python -m ltx.cli status --config configs/native_cifar100_if100.yaml
-tail -f runs/<campaign>/worker_*.launcher.log
+python -m ltx.cli status --watch 20 --config configs/native_cifar100_if100.yaml
+python -m ltx.cli retry-failed --config configs/native_cifar100_if100.yaml
+python -m ltx.cli stop --config configs/native_cifar100_if100.yaml
 ```
 
-The evaluator may write a fast preview before the canonical detailed result.
-Generated Inception features are cached beside the run and reused only when the
-sample artifact identity still matches.
+Rerunning the same campaign resumes from the newest complete local checkpoint.
+To resume one row from an explicitly named full-state checkpoint:
 
-## Development checks
+```bash
+python -m ltx.cli run \
+  --config configs/native_cifar100_if100.yaml \
+  --resume-method ddpm --resume-seed 0 \
+  --resume-checkpoint /absolute/path/ckpt_250000.pt
+```
+
+Checkpoints are atomically replaced and the server retry policy caps their
+interval, so SIGKILL recovery loses a bounded amount of work. Generated
+Inception features are cached only while the sample path, size, and mtime still
+match.
+
+## Smoke and verification
+
+The smoke config is infrastructure-only and deliberately bypasses the locked
+paper preflight:
+
+```bash
+bash scripts/run.sh configs/smoke_ccua.yaml --skip-preflight
+```
+
+Before handing off a change:
 
 ```bash
 python -m pytest -q
+bash -n scripts/*.sh
 git diff --check
 ```
-
-Keep baseline behavior in the shared runtime, expose configuration through the
-CCUA adapter, and add a focused regression test for every operational change.

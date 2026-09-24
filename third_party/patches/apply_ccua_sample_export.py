@@ -8,7 +8,7 @@ Two operational changes, both opt-in and both confined to ``main.py --sample``:
   (category, N, step, omega, scheduler, gamma, seed, DDIM steps), so predicting
   it in the adapter would couple the runner to float formatting of two flags.
   It *redirects* rather than adds a second write: a 50k CIFAR array is ~600 MB,
-  and saving both copies would cost ~11 GB across an 18-task campaign.
+  so duplicate copies would waste several GB across a campaign.
 
 * ``--uniform_labels`` replaces the iid ``torch.randint`` conditioning draw with
   an exact class-uniform schedule.  Every method in the unified table must be
@@ -41,6 +41,13 @@ def main() -> None:
     repo = Path(args.repo).resolve()
     marker = repo / MARKER
     if marker.exists():
+        text = (repo / "main.py").read_text(encoding="utf-8")
+        required = ("sample_output", "uniform_labels", "np.save")
+        missing = [token for token in required if token not in text]
+        if missing:
+            raise RuntimeError(
+                f"CCUA sample-export marker exists but main.py is missing {missing}"
+            )
         return
     path = repo / "main.py"
     text = path.read_text(encoding="utf-8")

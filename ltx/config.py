@@ -26,7 +26,6 @@ class Task:
     runtime: Dict[str, Any]
     retry: Dict[str, Any]
     tags: List[str] = field(default_factory=list)
-    semantic_eval_command: str = ""
     run_dir: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -88,19 +87,11 @@ def load_campaign(config_path: str | Path) -> LoadedCampaign:
         dataset = dict(stage.get("dataset", {}))
         if dataset.get("root"):
             dataset["root"] = _resolve(root, dataset["root"])
-        for key in ("frozen_manifest", "manifest", "reference_manifest"):
-            if dataset.get(key):
-                dataset[key] = _resolve(root, dataset[key])
         seeds = stage.get("seeds", campaign_cfg.get("paired_seeds", [0, 1, 2]))
         for method_cfg in stage.get("methods", []):
             method_cfg = dict(method_cfg)
-            weight_file = method_cfg.get("weight_file", "")
-            if weight_file:
-                method_cfg["weight_file"] = _resolve(root, weight_file)
             if method_cfg.get("resume_checkpoint"):
                 method_cfg["resume_checkpoint"] = _resolve(root, str(method_cfg["resume_checkpoint"]))
-            if method_cfg.get("enabled_if_present") and not method_cfg.get("weight_file"):
-                continue
             method = method_cfg["name"]
             for seed in seeds:
                 task_id = stable_id(campaign_name, stage["name"], method, seed)
@@ -121,7 +112,6 @@ def load_campaign(config_path: str | Path) -> LoadedCampaign:
                     runtime=runtime,
                     retry=retry,
                     tags=list(stage.get("tags", [])),
-                    semantic_eval_command=stage.get("semantic_eval_command", ""),
                     run_dir=run_dir,
                 ))
 
