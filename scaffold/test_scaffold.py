@@ -10,6 +10,7 @@ from scaffold.core import (
     reverse_sample,
 )
 from scaffold.common import OUTPUTS_ROOT, load_frozen_score, output_directory
+from scaffold.sample import FIXED_SWEEP, write_fixed_sweep_table
 from scaffold.train import training_signature
 
 
@@ -138,3 +139,26 @@ def test_loads_ema_checkpoint_and_freezes_every_score_parameter(tmp_path):
 
     assert not loaded.training
     assert all(not parameter.requires_grad for parameter in loaded.parameters())
+
+
+def test_fixed_sweep_has_the_requested_five_ratios():
+    assert [rho for _name, _label, rho in FIXED_SWEEP] == [0.0, 0.25, 0.5, 1.0, 2.0]
+
+
+def test_fixed_sweep_table_reads_canonical_metric_artifacts(tmp_path):
+    metrics = tmp_path / "metrics"
+    metrics.mkdir()
+    for index, (condition, _label, _rho) in enumerate(FIXED_SWEEP):
+        (metrics / f"{condition}.json").write_text(
+            '{"metrics": {"FID": %s, "Recall": 0.5}}' % (10 + index),
+            encoding="utf-8",
+        )
+        (metrics / f"{condition}.per_class.json").write_text(
+            '{"groups": {"Many": {"FID": 1}, "Medium": {"FID": 2}, "Few": {"FID": 3}}}',
+            encoding="utf-8",
+        )
+
+    table = write_fixed_sweep_table(tmp_path)
+
+    assert "Standard SDE" in table.read_text(encoding="utf-8")
+    assert "N/A" in table.read_text(encoding="utf-8")

@@ -21,7 +21,13 @@ from scaffold.common import (
     set_reproducible_seed,
     sha256_file,
 )
-from scaffold.sample import evaluate_conditions, sample_conditions
+from scaffold.sample import (
+    FIXED_SWEEP,
+    evaluate_conditions,
+    sample_conditions,
+    sample_fixed_sweep,
+    write_fixed_sweep_table,
+)
 from scaffold.train import train_scaffold
 
 
@@ -75,23 +81,43 @@ def run(args: argparse.Namespace) -> None:
             output,
             device,
         )
+    if args.command == "fixed-sweep":
+        sample_fixed_sweep(
+            score_model,
+            score_checkpoint,
+            score_sha256,
+            config,
+            output,
+            device,
+        )
+        fixed_conditions = tuple(condition for condition, _label, _rho in FIXED_SWEEP)
+        evaluate_conditions(config, output, fixed_conditions)
+        result = write_fixed_sweep_table(output)
+        print(f"[result] {result}")
     if args.command == "all" and bool(config["evaluation"].get("enabled", False)):
         evaluate_conditions(config, output)
 
 
 def show_plan(config: dict, checkpoint: Path, output: Path) -> None:
+    condition_count = 5 if config["experiment"].get("kind") == "fixed_sweep" else 2
     print(f"score checkpoint: {checkpoint}")
     print(f"frozen weights:   {config['model']['checkpoint_key']}")
     print(f"output:           {output}")
     print(f"updates:          {config['training']['updates']}")
-    print(f"samples:          {config['sampling']['num_images']} x 2 paired conditions")
+    print(
+        f"samples:          {config['sampling']['num_images']} "
+        f"x {condition_count} paired conditions"
+    )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Isolated stage-2 scaffold on a frozen EMA score checkpoint."
     )
-    parser.add_argument("command", choices=("plan", "train", "sample", "evaluate", "all"))
+    parser.add_argument(
+        "command",
+        choices=("plan", "train", "sample", "evaluate", "all", "fixed-sweep"),
+    )
     parser.add_argument(
         "--config",
         type=Path,

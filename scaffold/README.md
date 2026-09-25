@@ -89,6 +89,23 @@ python -m scaffold.run evaluate \
 
 Metric và feature cache vẫn được ghi dưới `scaffold/outputs/<name>/metrics/`.
 
+## Fixed A/A0 sweep
+
+Sweep `A/A0 = {0, 0.25, 0.5, 1, 2}` không train thêm parameter nào:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m scaffold.run fixed-sweep \
+  --config scaffold/config.fixed_sweep.yaml \
+  --checkpoint /absolute/path/ckpt_300000.pt \
+  --name ddpm_300k_fixed_a_sweep
+```
+
+Năm condition dùng cùng labels và random-noise seed. Command có thể chạy lại:
+sample/metric hoàn tất được giữ nguyên. Bảng kết quả được ghi thành JSON, CSV và
+Markdown trong output. `Class-valid` được để `N/A` nếu chưa cung cấp một frozen
+CIFAR-100 classifier độc lập; requested conditioning label không được coi là
+bằng chứng ảnh đúng lớp.
+
 ## Tiêu chí đọc kết quả
 
 - Primary: Few-class FID của `learned` tốt hơn `rho_1` trên paired seeds.
