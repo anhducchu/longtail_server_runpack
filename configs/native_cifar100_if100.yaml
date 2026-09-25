@@ -63,16 +63,6 @@ native_eval: &native_eval
   metric_protocol: native_cifar_v1
   paper_metrics: true
   fast_metrics: true
-  feature_cache: true
-  fast_metrics_file: fast_metrics_preview.json
-  fast_per_class_metrics_file: fast_per_class_fids.json
-  metrics_file: metrics.native.json
-  per_class_metrics_file: metrics.per_class.native.json
-  longtail_groups: cm_three_way
-  kid: true
-  kid_subsets: 100
-  kid_subset_size: 1000
-  kid_seed: 2026
 
 stages:
   - name: c100_if100_core

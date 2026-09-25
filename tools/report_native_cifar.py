@@ -75,11 +75,6 @@ def read_per_class_metrics(run_dir: Path) -> tuple[str, dict[str, float]]:
     return ("complete" if set(parsed) == set(GROUPS) else "incomplete"), parsed
 
 
-def groups_required(task_eval: dict[str, Any]) -> bool:
-    """Require group FIDs only for the native three-way long-tail contract."""
-    return task_eval.get("longtail_groups") == "cm_three_way"
-
-
 def _missing_metric_reason(metrics: dict[str, float]) -> str:
     missing = [metric for metric in METRICS if metric not in metrics]
     return "" if not missing else f"missing metrics: {', '.join(missing)}"
@@ -260,14 +255,13 @@ def main() -> int:
         run_dir = Path(task.run_dir)
         metrics = read_metrics(run_dir)
         per_class_status, per_class = read_per_class_metrics(run_dir)
-        require_groups = groups_required(task.eval)
         reasons = []
         if not (run_dir / "SUCCESS").is_file():
             reasons.append("missing SUCCESS")
         if missing := _missing_metric_reason(metrics):
             reasons.append(missing)
         missing_groups = [group for group in GROUPS if group not in per_class]
-        if require_groups and missing_groups:
+        if missing_groups:
             reasons.append(f"missing groups: {', '.join(missing_groups)}")
         rows.append({
             "dataset": task.dataset["name"],

@@ -1,20 +1,10 @@
 #!/usr/bin/env python3
-"""Evaluate one generated CIFAR array with a pinned common metric protocol.
+"""Evaluate 50k class-uniform CIFAR-100 samples.
 
-``--mode headline`` is the early-result protocol: it reports the common
-Inception FID/IS/PRD columns and deterministic KID, but deliberately omits
-the exact VGG16 50k-by-50k improved-PRD and every per-class FID. The default
-``detailed`` mode writes the canonical final metric set and an atomic
-headline snapshot before starting those optional expensive calculations.
-``--mode quick`` accepts a smaller class-uniform smoke sample and reports only
-the common fast metrics; its values are not for paper reporting or direct
-comparison with the 50k protocol. ``--mode gpu_fast`` is a deliberately
-non-canonical 50k preview: it uses CUDA for FID/KID and per-class/split FID,
-omits the CPU Inception PRD and VGG improved-PRD columns, and is never used by
-the paper report. ``--mode improved_pr`` computes only the canonical VGG16
-improved Precision/Recall pair, reusing the balanced reference features and
-radii; it intentionally skips Inception PRD/F8/F1/8 and all other metrics.
-All modes can reuse the generated Inception feature cache.
+``detailed`` writes the complete paper metric set. It publishes an atomic
+headline snapshot before starting the expensive VGG/per-class calculations.
+``gpu_fast`` is a clearly marked CUDA preview and is never used by the paper
+report. Both modes reuse the generated Inception feature cache.
 """
 from __future__ import annotations
 
@@ -31,6 +21,12 @@ from runner.metrics import improved_prd_vgg16_k3, polynomial_mmd_kid, polynomial
 
 
 _IS_SPLITS = 10
+_DATASET = "cifar100"
+_NUM_CLASSES = 100
+_NUM_SAMPLES = 50_000
+_KID_SUBSETS = 100
+_KID_SUBSET_SIZE = 1_000
+_KID_SEED = 2026
 
 
 def _atomic_write_json(path: Path, payload: dict) -> None:
@@ -399,15 +395,16 @@ def _fid_gpu(features: np.ndarray, reference: np.ndarray) -> float:
     )
 
 
-def _standard_prd_scores(generated_features: np.ndarray, reference_features: np.ndarray,
-                         nclass: int) -> tuple[float, float]:
+def _standard_prd_scores(
+    generated_features: np.ndarray, reference_features: np.ndarray
+) -> tuple[float, float]:
     """Run the canonical 10-run Inception PRD protocol on reused activations."""
     from score.prd_score import compute_prd_from_embedding, prd_to_max_f_beta_pair
 
     prd_data = compute_prd_from_embedding(
         eval_data=generated_features,
         ref_data=reference_features,
-        num_clusters=nclass * 20,
+        num_clusters=_NUM_CLASSES * 20,
         num_angles=1001,
         num_runs=10,
         enforce_balance=True,
@@ -416,108 +413,52 @@ def _standard_prd_scores(generated_features: np.ndarray, reference_features: np.
     return float(f_8), float(f_1_8)
 
 
-def _three_way_groups(nclass: int) -> dict[str, np.ndarray]:
-    if nclass == 10:
-        return {
-            "Many": np.arange(0, 3),
-            "Medium": np.arange(3, 6),
-            "Few": np.arange(6, 10),
-        }
-    if nclass == 100:
-        return {
-            "Many": np.arange(0, 33),
-            "Medium": np.arange(33, 66),
-            "Few": np.arange(66, 100),
-        }
-    raise ValueError(f"Many/Medium/Few grouping only supports 10 or 100 classes, got {nclass}")
-
-
-def _base_protocol(nclass: int, args, sample_count: int = 50000) -> dict:
+def _three_way_groups() -> dict[str, np.ndarray]:
     return {
-        "samples": sample_count,
+        "Many": np.arange(0, 33),
+        "Medium": np.arange(33, 66),
+        "Few": np.arange(66, 100),
+    }
+
+
+def _base_protocol(args) -> dict:
+    return {
+        "samples": _NUM_SAMPLES,
         "labels": "uniform support across classes",
-        "real_reference": "balanced CIFAR train",
-        "standard_prd": f"InceptionV3, {nclass * 20} clusters",
+        "real_reference": "balanced CIFAR-100 train",
+        "standard_prd": "InceptionV3, 2000 clusters",
         "improved_prd": "VGG16 fc2, exact k-NN manifold k=3",
         "inception_batch_size": args.inception_batch_size,
         "inception_device": getattr(args, "device", "cuda"),
     }
 
 
-def _headline_protocol(protocol: dict, mode: str = "headline") -> dict:
+def _headline_protocol(protocol: dict) -> dict:
     headline = dict(protocol)
-    if mode == "quick":
-        caveat = (
-            f"Quick smoke uses {protocol['samples']} class-uniform samples instead of the paper's 50k; "
-            "it is not for paper reporting and must not be compared directly with 50k results. "
-            f"{protocol['prd_reference']}. "
-            "It omits VGG16 fc2 exact improved-PRD (ImprovedPrecision/Recall) "
-            "from the overall quick report; optional per-class FIDs are written separately."
-        )
-    else:
-        caveat = (
-            "Headline mode omits VGG16 fc2 exact improved-PRD (ImprovedPrecision/Recall) "
-            "and all per-class/split FIDs. F_8 and F_1_8 remain the standard Inception PRD protocol."
-        )
-    headline.update({"evaluation_mode": mode, "important_caveat": caveat})
+    headline.update({
+        "evaluation_mode": "headline",
+        "important_caveat": (
+            "Early snapshot: VGG16 improved-PRD and per-class/split FIDs are still pending. "
+            "F_8 and F_1_8 use the standard Inception PRD protocol."
+        ),
+    })
     return headline
 
 
-def _quick_prd_reference_subset(
-    args, reference_features: np.ndarray, nclass: int, sample_count: int, dataset: str
-) -> np.ndarray:
-    """Select the deterministic balanced real subset used by quick PRD."""
-    labels_path = args.metrics_root / f"{dataset}_labels.npy"
-    if not labels_path.is_file():
-        raise FileNotFoundError(
-            f"quick PRD requires the balanced-reference labels asset {labels_path}; "
-            "rerun tools/prepare_cifar_metric_assets.py"
-        )
-    reference_labels = np.load(labels_path, mmap_mode="r")
-    if reference_labels.ndim != 1 or reference_labels.shape[0] != reference_features.shape[0]:
-        raise ValueError(
-            "quick PRD requires reference features and labels with matching [N] lengths, got "
-            f"features={reference_features.shape} labels={reference_labels.shape}"
-        )
-    per_class, remainder = divmod(sample_count, nclass)
-    if remainder:
-        raise ValueError(
-            f"quick PRD requires a sample count divisible by {nclass}, got N={sample_count}"
-        )
-    selected = []
-    reference_labels_array = np.asarray(reference_labels)
-    for class_id in range(nclass):
-        class_indices = np.flatnonzero(reference_labels_array == class_id)
-        if len(class_indices) < per_class:
-            raise ValueError(
-                f"quick PRD reference has only {len(class_indices)} samples for class {class_id}; "
-                f"requires {per_class}"
-            )
-        selected.append(class_indices[:per_class])
-    return np.asarray(reference_features[np.concatenate(selected)])
-
-
-def _collect_headline_metrics(args, images: np.ndarray, nclass: int, dataset: str) -> tuple[dict, np.ndarray, np.ndarray]:
+def _collect_headline_metrics(
+    args, images: np.ndarray
+) -> tuple[dict, np.ndarray, np.ndarray]:
     """Compute every shared canonical headline metric from one feature array."""
     generated_features, (is_score, is_std) = _cached_inception_features_and_is(args, images)
-    reference_features = np.load(args.metrics_root / f"{dataset}_feats.npy", mmap_mode="r")
-    prd_reference_features = reference_features
-    if args.mode == "quick":
-        prd_reference_features = _quick_prd_reference_subset(
-            args, reference_features, nclass, len(generated_features), dataset
-        )
+    reference_features = np.load(args.metrics_root / f"{_DATASET}_feats.npy", mmap_mode="r")
     sys.path.insert(0, str(args.repo))
     from score.fid import calculate_frechet_distance
 
-    with np.load(args.metrics_root / f"{dataset}.train.npz") as statistics:
+    with np.load(args.metrics_root / f"{_DATASET}.train.npz") as statistics:
         fid = _fid_to_statistics(
             generated_features, statistics["mu"][:], statistics["sigma"][:], calculate_frechet_distance
         )
-    f_8, f_1_8 = _standard_prd_scores(
-        generated_features,
-        prd_reference_features,
-        nclass,
-    )
+    f_8, f_1_8 = _standard_prd_scores(generated_features, reference_features)
     metrics = {
         "FID": float(fid),
         "IS": float(is_score),
@@ -525,20 +466,17 @@ def _collect_headline_metrics(args, images: np.ndarray, nclass: int, dataset: st
         "F_8": float(f_8),
         "F_1_8": float(f_1_8),
     }
-    if args.kid or args.mode in ("headline", "quick"):
-        metrics["KID"] = polynomial_mmd_kid(
-            generated_features,
-            reference_features,
-            num_subsets=args.kid_subsets,
-            max_subset_size=args.kid_subset_size,
-            rng=np.random.default_rng(args.kid_seed),
-        )
+    metrics["KID"] = polynomial_mmd_kid(
+        generated_features,
+        reference_features,
+        num_subsets=_KID_SUBSETS,
+        max_subset_size=_KID_SUBSET_SIZE,
+        rng=np.random.default_rng(_KID_SEED),
+    )
     return metrics, generated_features, reference_features
 
 
-def _collect_gpu_fast_metrics(
-    args, images: np.ndarray, nclass: int, dataset: str
-) -> tuple[dict, np.ndarray, np.ndarray]:
+def _collect_gpu_fast_metrics(args, images: np.ndarray) -> tuple[dict, np.ndarray, np.ndarray]:
     """Compute the fast 50k preview without the CPU Inception PRD pass.
 
     Inception extraction is shared with the canonical phase through the cache.
@@ -548,8 +486,8 @@ def _collect_gpu_fast_metrics(
     marked as preview-only by :func:`_evaluate`.
     """
     generated_features, (is_score, is_std) = _cached_inception_features_and_is(args, images)
-    reference_features = np.load(args.metrics_root / f"{dataset}_feats.npy", mmap_mode="r")
-    with np.load(args.metrics_root / f"{dataset}.train.npz") as statistics:
+    reference_features = np.load(args.metrics_root / f"{_DATASET}_feats.npy", mmap_mode="r")
+    with np.load(args.metrics_root / f"{_DATASET}.train.npz") as statistics:
         fid = _fid_to_statistics_gpu(
             generated_features,
             statistics["mu"][:],
@@ -562,62 +500,17 @@ def _collect_gpu_fast_metrics(
         "KID": polynomial_mmd_kid_gpu(
             generated_features,
             reference_features,
-            num_subsets=args.kid_subsets,
-            max_subset_size=args.kid_subset_size,
-            rng=np.random.default_rng(args.kid_seed),
+            num_subsets=_KID_SUBSETS,
+            max_subset_size=_KID_SUBSET_SIZE,
+            rng=np.random.default_rng(_KID_SEED),
         ),
     }
     return metrics, generated_features, reference_features
 
 
-def _evaluate_improved_pr_only(
-    args, images: np.ndarray, labels: np.ndarray, counts: np.ndarray, nclass: int, dataset: str
-) -> dict:
-    """Compute only the canonical VGG16 improved Precision/Recall metrics.
-
-    This partial evaluator keeps the detailed mode's VGG16 fc2 and k=3
-    manifold definition, but skips the expensive CPU Inception PRD pass and
-    does not write a misleading full metric artifact under
-    ``metrics.native.json``.
-    """
-    reference_vgg_features = np.load(args.metrics_root / f"{dataset}_vgg16_fc2.npy", mmap_mode="r")
-    reference_radii = np.load(args.metrics_root / f"{dataset}_vgg16_fc2_k3_radii.npy", mmap_mode="r")
-    precision, recall = improved_prd_vgg16_k3(
-        np.asarray(images),
-        np.asarray(reference_vgg_features),
-        np.asarray(reference_radii),
-        batch_size=args.vgg_batch_size,
-        query_batch=args.knn_query_batch,
-        device=getattr(args, "device", "cuda"),
-    )
-    protocol = _base_protocol(nclass, args, sample_count=int(images.shape[0]))
-    protocol.update({
-        "evaluation_mode": "improved_pr_only",
-        "paper_report_ready": False,
-        "metric_backend": f"{getattr(args, 'device', 'cuda')}_vgg_exact",
-        "reported_metrics": ["ImprovedPrecision", "Recall"],
-        "omitted_metrics": ["FID", "IS", "F_8", "F_1_8", "KID", "sFID"],
-        "important_caveat": (
-            "Partial VGG16 fc2 exact k-NN manifold evaluation. A 10000-sample run is a "
-            "within-campaign screening result, not paper-reporting quality. Inception PRD "
-            "F_8/F_1_8 and all other metrics were intentionally skipped."
-        ),
-    })
-    payload = {
-        "metrics": {
-            "ImprovedPrecision": float(precision),
-            "Recall": float(recall),
-        },
-        "protocol": protocol,
-        "label_histogram": counts.tolist(),
-    }
-    _atomic_write_json(args.output, payload)
-    return payload
-
-
 def _per_class_payload(args, generated_features: np.ndarray, reference_features: np.ndarray,
-                       labels: np.ndarray, nclass: int, dataset: str) -> dict:
-    labels_path = args.metrics_root / f"{dataset}_labels.npy"
+                       labels: np.ndarray) -> dict:
+    labels_path = args.metrics_root / f"{_DATASET}_labels.npy"
     if not labels_path.is_file():
         raise FileNotFoundError(
             f"per-class FID requires the balanced-reference labels asset {labels_path}; "
@@ -636,7 +529,7 @@ def _per_class_payload(args, generated_features: np.ndarray, reference_features:
         return _fid(generated_slice, reference_slice, calculate_frechet_distance)
 
     per_class = {}
-    for class_id in range(nclass):
+    for class_id in range(_NUM_CLASSES):
         generated_mask = labels == class_id
         reference_mask = np.asarray(reference_labels) == class_id
         generated_slice = generated_features[generated_mask]
@@ -647,26 +540,21 @@ def _per_class_payload(args, generated_features: np.ndarray, reference_features:
             "reference": int(reference_mask.sum()),
         }
     groups = {}
-    if args.longtail_groups == "cm_three_way":
-        for name, classes in _three_way_groups(nclass).items():
-            generated_mask = np.isin(labels, classes)
-            reference_mask = np.isin(reference_labels, classes)
-            groups[name] = {
-                "FID": compute_fid(generated_features[generated_mask], reference_features[reference_mask]),
-                "classes": classes.tolist(),
-                "generated": int(generated_mask.sum()),
-                "reference": int(reference_mask.sum()),
-            }
-    sample_count = int(labels.shape[0])
+    for name, classes in _three_way_groups().items():
+        generated_mask = np.isin(labels, classes)
+        reference_mask = np.isin(reference_labels, classes)
+        groups[name] = {
+            "FID": compute_fid(generated_features[generated_mask], reference_features[reference_mask]),
+            "classes": classes.tolist(),
+            "generated": int(generated_mask.sum()),
+            "reference": int(reference_mask.sum()),
+        }
     return {
         "protocol": {
             "feature_extractor": "pinned active-backbone InceptionV3 (2048-d)",
             "reference": "balanced CIFAR train",
-            "sample_count": sample_count,
-            "sample_schedule": (
-                f"same {'50k' if sample_count == 50000 else sample_count} "
-                "class-uniform samples as overall table"
-            ),
+            "sample_count": _NUM_SAMPLES,
+            "sample_schedule": "same 50k class-uniform samples as overall table",
             "fid_computation": (
                 "exact sample-covariance FID; class slices whose generated-by-reference Gram matrix "
                 "is no larger than 2048-by-2048 use an equivalent low-rank nuclear-norm formulation, "
@@ -677,8 +565,8 @@ def _per_class_payload(args, generated_features: np.ndarray, reference_features:
             ),
             "important_caveat": (
                 "Published split FIDs may use separately sampled 20k generated images per split. "
-                f"These values use the common table's class-uniform "
-                f"{'50k' if sample_count == 50000 else sample_count} sample and are only comparable within this campaign."
+                "These values use the common table's class-uniform 50k sample and are only "
+                "comparable within this campaign."
             ),
         },
         "per_class": per_class,
@@ -686,17 +574,12 @@ def _per_class_payload(args, generated_features: np.ndarray, reference_features:
     }
 
 
-def _evaluate(args, images: np.ndarray, labels: np.ndarray, counts: np.ndarray, nclass: int) -> dict:
+def _evaluate(args, images: np.ndarray, labels: np.ndarray, counts: np.ndarray) -> dict:
     """Run one protocol, publishing fast previews separately from paper output."""
-    dataset = "cifar100" if nclass == 100 else "cifar10"
-    if args.mode == "improved_pr":
-        return _evaluate_improved_pr_only(args, images, labels, counts, nclass, dataset)
     if args.mode == "gpu_fast":
         args.metric_backend = "gpu"
-        metrics, generated_features, reference_features = _collect_gpu_fast_metrics(
-            args, images, nclass, dataset
-        )
-        protocol = _base_protocol(nclass, args, sample_count=int(images.shape[0]))
+        metrics, generated_features, reference_features = _collect_gpu_fast_metrics(args, images)
+        protocol = _base_protocol(args)
         protocol.update({
             "evaluation_mode": "gpu_fast",
             "paper_report_ready": False,
@@ -710,7 +593,7 @@ def _evaluate(args, images: np.ndarray, labels: np.ndarray, counts: np.ndarray, 
         })
         if args.per_class_output is not None:
             per_class_payload = _per_class_payload(
-                args, generated_features, reference_features, labels, nclass, dataset
+                args, generated_features, reference_features, labels
             )
             for name, group in per_class_payload["groups"].items():
                 metrics[f"{name}_FID"] = float(group["FID"])
@@ -723,47 +606,26 @@ def _evaluate(args, images: np.ndarray, labels: np.ndarray, counts: np.ndarray, 
         _atomic_write_json(args.output, payload)
         return payload
 
-    headline_metrics, generated_features, reference_features = _collect_headline_metrics(args, images, nclass, dataset)
-    sample_count = int(images.shape[0]) if args.mode == "quick" else 50000
-    protocol = _base_protocol(nclass, args, sample_count=sample_count)
-    if args.mode == "quick":
-        protocol["prd_reference"] = (
-            "F_8/F_1_8 use the deterministic class-balanced real subset "
-            f"with the first {sample_count // nclass} reference samples per class "
-            f"({sample_count} total)"
-        )
-    if "KID" in headline_metrics:
-        protocol["kid"] = {
-            "feature_extractor": "pinned active-backbone InceptionV3 (2048-d)",
-            "estimator": "unbiased cubic polynomial MMD",
-            "subsets": args.kid_subsets,
-            "max_subset_size": args.kid_subset_size,
-            "subset_rng_seed": args.kid_seed,
-        }
-    headline_mode = "quick" if args.mode == "quick" else "headline"
+    headline_metrics, generated_features, reference_features = _collect_headline_metrics(args, images)
+    protocol = _base_protocol(args)
+    protocol["kid"] = {
+        "feature_extractor": "pinned active-backbone InceptionV3 (2048-d)",
+        "estimator": "unbiased cubic polynomial MMD",
+        "subsets": _KID_SUBSETS,
+        "max_subset_size": _KID_SUBSET_SIZE,
+        "subset_rng_seed": _KID_SEED,
+    }
     headline_payload = {
         "metrics": headline_metrics,
-        "protocol": _headline_protocol(protocol, mode=headline_mode),
+        "protocol": _headline_protocol(protocol),
         "label_histogram": counts.tolist(),
     }
     # The primary path becomes available as a valid headline report immediately;
     # detailed mode atomically replaces it only after all optional work succeeds.
     _atomic_write_json(args.output, headline_payload)
-    if args.headline_output is not None:
-        _atomic_write_json(args.headline_output, headline_payload)
-    if args.mode == "quick":
-        if args.per_class_output is not None:
-            _atomic_write_json(
-                args.per_class_output,
-                _per_class_payload(args, generated_features, reference_features, labels, nclass, dataset),
-            )
-        return headline_payload
-    if args.mode == "headline":
-        return headline_payload
-
     metrics = dict(headline_metrics)
-    reference_vgg_features = np.load(args.metrics_root / f"{dataset}_vgg16_fc2.npy", mmap_mode="r")
-    reference_radii = np.load(args.metrics_root / f"{dataset}_vgg16_fc2_k3_radii.npy", mmap_mode="r")
+    reference_vgg_features = np.load(args.metrics_root / f"{_DATASET}_vgg16_fc2.npy", mmap_mode="r")
+    reference_radii = np.load(args.metrics_root / f"{_DATASET}_vgg16_fc2_k3_radii.npy", mmap_mode="r")
     precision, recall = improved_prd_vgg16_k3(
         np.asarray(images),
         np.asarray(reference_vgg_features),
@@ -777,7 +639,7 @@ def _evaluate(args, images: np.ndarray, labels: np.ndarray, counts: np.ndarray, 
     if args.per_class_output is not None:
         _atomic_write_json(
             args.per_class_output,
-            _per_class_payload(args, generated_features, reference_features, labels, nclass, dataset),
+            _per_class_payload(args, generated_features, reference_features, labels),
         )
     payload = {"metrics": metrics, "protocol": protocol, "label_histogram": counts.tolist()}
     _atomic_write_json(args.output, payload)
@@ -787,21 +649,13 @@ def _evaluate(args, images: np.ndarray, labels: np.ndarray, counts: np.ndarray, 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", type=Path, required=True)
-    parser.add_argument("--data-type", choices=("cifar10lt", "cifar100lt"), required=True)
     parser.add_argument("--samples", type=Path, required=True)
     parser.add_argument("--labels", type=Path, required=True)
     parser.add_argument("--metrics-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
-        "--mode", choices=("detailed", "headline", "quick", "gpu_fast", "improved_pr"), default="detailed",
-        help=("detailed preserves canonical 50k VGG/per-class behavior; headline emits "
-              "canonical common metrics without details; quick accepts a smaller class-uniform "
-              "smoke sample; gpu_fast emits a 50k CUDA preview without Inception PRD/VGG; "
-              "improved_pr emits only canonical VGG improved Precision/Recall"),
-    )
-    parser.add_argument(
-        "--headline-output", type=Path, default=None,
-        help="optional permanent atomic headline JSON; --output is also written early then replaced by the detailed result",
+        "--mode", choices=("detailed", "gpu_fast"), default="detailed",
+        help="detailed writes paper metrics; gpu_fast writes a CUDA preview",
     )
     parser.add_argument(
         "--inception-batch-size", type=int, default=16,
@@ -817,13 +671,8 @@ def main() -> None:
     )
     parser.add_argument("--vgg-batch-size", type=int, default=128)
     parser.add_argument("--knn-query-batch", type=int, default=1024)
-    parser.add_argument("--kid", action="store_true", help="append deterministic cubic-kernel KID in detailed mode (always included in headline and quick modes)")
-    parser.add_argument("--kid-subsets", type=int, default=100)
-    parser.add_argument("--kid-subset-size", type=int, default=1000)
-    parser.add_argument("--kid-seed", type=int, default=2026)
     parser.add_argument("--per-class-output", type=Path, default=None,
-                        help="optional JSON with per-class FID and Many/Medium/Few FIDs (detailed and quick modes)")
-    parser.add_argument("--longtail-groups", choices=("none", "cm_three_way"), default="none")
+                        help="optional JSON with per-class FID and Many/Medium/Few FIDs")
     args = parser.parse_args()
     if args.inception_batch_size <= 0:
         parser.error("--inception-batch-size must be positive")
@@ -831,45 +680,22 @@ def main() -> None:
         parser.error("--vgg-batch-size must be positive")
     if args.knn_query_batch <= 0:
         parser.error("--knn-query-batch must be positive")
-    if args.kid_subsets <= 0:
-        parser.error("--kid-subsets must be positive")
-    if args.kid_subset_size <= 1:
-        parser.error("--kid-subset-size must be at least two")
-    if args.mode == "headline" and args.per_class_output is not None:
-        parser.error("--mode headline intentionally omits per-class FID; rerun with --mode detailed for --per-class-output")
-    if args.mode == "detailed" and args.headline_output is not None and args.headline_output == args.output:
-        parser.error("--headline-output must differ from --output in detailed mode so the headline result remains available")
-
     args.samples = Path(args.samples).resolve()
     if args.generated_features_cache is not None:
         args.generated_features_cache = Path(args.generated_features_cache).resolve()
     images = np.load(args.samples, mmap_mode="r")
     labels = np.load(args.labels, mmap_mode="r")
-    nclass = 100 if args.data_type == "cifar100lt" else 10
-    if args.mode in ("detailed", "headline"):
-        if images.shape != (50000, 3, 32, 32) or labels.shape != (50000,):
-            raise ValueError(f"paper protocol requires 50k CIFAR arrays, got images={images.shape} labels={labels.shape}")
-    elif args.mode == "improved_pr":
-        if images.ndim != 4 or images.shape[1:] != (3, 32, 32):
-            raise ValueError(f"improved_pr requires images with shape [N, 3, 32, 32], got {images.shape}")
-        if labels.ndim != 1 or labels.shape != (images.shape[0],) or images.shape[0] < 3:
-            raise ValueError(f"improved_pr requires matching labels and at least 3 images, got {images.shape}/{labels.shape}")
-    else:
-        if images.ndim != 4 or images.shape[1:] != (3, 32, 32):
-            raise ValueError(f"quick protocol requires images with shape [N, 3, 32, 32], got {images.shape}")
-        if labels.ndim != 1 or labels.shape != (images.shape[0],):
-            raise ValueError(f"quick protocol requires labels with shape [N], got {labels.shape} for N={images.shape[0]}")
-        if images.shape[0] <= 0 or images.shape[0] % nclass != 0:
-            raise ValueError(
-                f"quick protocol requires a positive sample count divisible by {nclass}, got N={images.shape[0]}"
-            )
+    if images.shape != (_NUM_SAMPLES, 3, 32, 32) or labels.shape != (_NUM_SAMPLES,):
+        raise ValueError(
+            f"CIFAR-100 protocol requires 50k arrays, got images={images.shape} labels={labels.shape}"
+        )
     labels_array = np.asarray(labels)
-    counts = np.bincount(np.asarray(labels_array, dtype=np.int64), minlength=nclass)
-    expected_count = images.shape[0] // nclass
-    if len(counts) != nclass or np.any(counts != expected_count):
+    counts = np.bincount(np.asarray(labels_array, dtype=np.int64), minlength=_NUM_CLASSES)
+    expected_count = _NUM_SAMPLES // _NUM_CLASSES
+    if len(counts) != _NUM_CLASSES or np.any(counts != expected_count):
         raise ValueError(f"labels are not exactly class-uniform: {counts.tolist()}")
     os.environ["LTX_METRICS_ROOT"] = str(args.metrics_root.resolve())
-    payload = _evaluate(args, images, labels_array, counts, nclass)
+    payload = _evaluate(args, images, labels_array, counts)
     print(json.dumps(payload["metrics"], sort_keys=True))
 
 

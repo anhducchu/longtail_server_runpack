@@ -29,17 +29,17 @@ def sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def extract(repo: Path, data_root: Path, output: Path, dataset_name: str, batch_size: int) -> None:
+def extract(repo: Path, data_root: Path, output: Path, batch_size: int) -> None:
     import torch
     from torch.utils.data import DataLoader
     from torchvision import transforms
-    from torchvision.datasets import CIFAR10, CIFAR100
+    from torchvision.datasets import CIFAR100
 
     sys.path.insert(0, str(repo))
     from score.inception import InceptionV3
 
-    dataset_class = CIFAR10 if dataset_name == "cifar10" else CIFAR100
-    dataset = dataset_class(root=str(data_root), train=True, download=True, transform=transforms.ToTensor())
+    dataset_name = "cifar100"
+    dataset = CIFAR100(root=str(data_root), train=True, download=True, transform=transforms.ToTensor())
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=8, pin_memory=True)
     device = torch.device("cuda")
     model = InceptionV3([InceptionV3.BLOCK_INDEX_BY_DIM[2048]]).to(device).eval()
@@ -119,16 +119,21 @@ def main() -> None:
     parser.add_argument("--data-root", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--batch-size", type=int, default=128)
-    parser.add_argument("--datasets", nargs="+", choices=("cifar10", "cifar100"), default=("cifar10", "cifar100"))
     args = parser.parse_args()
     if not args.repo.joinpath("score", "inception.py").is_file():
         raise FileNotFoundError(f"metric host is missing score/inception.py: {args.repo}")
-    for name in args.datasets:
-        required = (args.output / f"{name}.train.npz", args.output / f"{name}_feats.npy", args.output / f"{name}_labels.npy", args.output / f"{name}_vgg16_fc2.npy", args.output / f"{name}_vgg16_fc2_k3_radii.npy", args.output / f"{name}.metric_manifest.json")
-        if all(path.exists() for path in required):
-            print(f"[metric-assets] keeping existing {name} assets in {args.output}")
-        else:
-            extract(args.repo.resolve(), args.data_root.resolve(), args.output.resolve(), name, args.batch_size)
+    required = (
+        args.output / "cifar100.train.npz",
+        args.output / "cifar100_feats.npy",
+        args.output / "cifar100_labels.npy",
+        args.output / "cifar100_vgg16_fc2.npy",
+        args.output / "cifar100_vgg16_fc2_k3_radii.npy",
+        args.output / "cifar100.metric_manifest.json",
+    )
+    if all(path.exists() for path in required):
+        print(f"[metric-assets] keeping existing CIFAR-100 assets in {args.output}")
+    else:
+        extract(args.repo.resolve(), args.data_root.resolve(), args.output.resolve(), args.batch_size)
 
 
 if __name__ == "__main__":

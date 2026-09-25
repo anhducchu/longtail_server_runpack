@@ -91,6 +91,8 @@ def test_ccua_adapter_adds_cuda_preview_and_shared_feature_cache(tmp_path):
     assert "--generated-features-cache" in fast_command
     assert "--generated-features-cache" in canonical_command
     assert "--mode detailed" in canonical_command
+    assert "metrics.native.json" in canonical_command
+    assert "metrics.per_class.native.json" in canonical_command
     assert "--legacy-prd-repeat" not in canonical_command
     # The preview filename is intentionally outside metrics*.json so W&B's
     # canonical collector cannot overwrite the paper artifact with partial data.

@@ -73,8 +73,7 @@ if [[ "$protocol" == native_cifar_v1 ]]; then
   python -m tools.prepare_cifar_metric_assets \
     --repo "$repos_root/CCUA-DDPM" \
     --data-root "${LTX_DATA_ROOT:-$ROOT/data}" \
-    --output "${LTX_METRICS_ROOT:-$repos_root/CCUA-DDPM/stats}" \
-    --datasets cifar100
+    --output "${LTX_METRICS_ROOT:-$repos_root/CCUA-DDPM/stats}"
 fi
 
 run_args=(--config "$CONFIG")

@@ -24,7 +24,7 @@ def load_report_module():
     return module
 
 
-def write_campaign(tmp_path: Path, *, require_groups: bool = False):
+def write_campaign(tmp_path: Path):
     runs_root = tmp_path / "runs"
     server = tmp_path / "server.yaml"
     server.write_text(json.dumps({"runtime": {"runs_root": str(runs_root)}}), encoding="utf-8")
@@ -37,10 +37,10 @@ def write_campaign(tmp_path: Path, *, require_groups: bool = False):
             "paired_seeds": [0, 1, 2],
         },
         "stages": [{
-            "name": "c10_if100",
-            "adapter": "native",
-            "dataset": {"name": "cifar10lt_if100"},
-            "eval": {"longtail_groups": "cm_three_way" if require_groups else "none"},
+            "name": "c100_if100",
+            "adapter": "ccua",
+            "dataset": {"name": "cifar100lt_if100"},
+            "eval": {},
             "methods": [{"name": "ddpm"}],
             "seeds": [0, 1, 2],
         }],
@@ -126,8 +126,8 @@ def test_native_report_fails_closed_for_missing_success_or_required_metric(tmp_p
     assert "missing SUCCESS" in per_seed[2]["failure_reason"]
 
 
-def test_native_report_requires_complete_many_medium_few_when_configured(tmp_path, monkeypatch):
-    config, campaign = write_campaign(tmp_path, require_groups=True)
+def test_native_report_requires_complete_many_medium_few(tmp_path, monkeypatch):
+    config, campaign = write_campaign(tmp_path)
     for task in campaign.tasks:
         groups = {"Many": {"FID": 10.0}, "Medium": {"FID": 11.0}, "Few": {"FID": 12.0}}
         if task.seed == 1:
@@ -153,7 +153,9 @@ def test_native_report_accepts_the_seed_zero_baseline_config(tmp_path, monkeypat
     payload["stages"][0]["seeds"] = [0]
     config.write_text(json.dumps(payload), encoding="utf-8")
     campaign = load_campaign(config)
-    write_run(campaign.tasks[0], {"metrics": native_metrics(0)})
+    write_run(campaign.tasks[0], {"metrics": native_metrics(0)}, per_class={"groups": {
+        "Many": {"FID": 10.0}, "Medium": {"FID": 11.0}, "Few": {"FID": 12.0},
+    }})
 
     output = tmp_path / "report"
     module = load_report_module()

@@ -305,52 +305,36 @@ class CCUAAdapter:
 
             if not evaluate.get("paper_metrics", False):
                 continue
-            metrics_file = str(evaluate.get("metrics_file", "metrics.paper.json"))
+            metrics_file = "metrics.native.json"
             if not single:
                 metrics_file = metrics_file.replace(".json", f"{suffix}.json")
             metric_base = [
                 py, "-m", "tools.evaluate_ccua",
                 "--repo", str(repo),
-                "--data-type", str(task.dataset["data_type"]),
                 "--samples", str(samples), "--labels", str(labels),
                 "--metrics-root", str(metrics_root),
                 "--inception-batch-size", str(inception_batch),
+                "--generated-features-cache", str(run_dir / f"inception_features{suffix}.npz"),
             ]
-            feature_cache = run_dir / f"inception_features{suffix}.npz"
-            if evaluate.get("feature_cache", True):
-                metric_base += ["--generated-features-cache", str(feature_cache)]
-
-            if evaluate.get("kid", False):
-                kid_args = ["--kid", "--kid-subsets", str(evaluate.get("kid_subsets", 100)),
-                            "--kid-subset-size", str(evaluate.get("kid_subset_size", 1000)),
-                            "--kid-seed", str(evaluate.get("kid_seed", 2026))]
-            else:
-                kid_args = []
-            per_class_file = str(evaluate.get("per_class_metrics_file", "")).strip()
+            per_class_file = "metrics.per_class.native.json"
 
             # A non-canonical preview gives fast feedback without being
             # mistaken for the complete paper metric artifact.
             if evaluate.get("fast_metrics", False):
-                fast_file = str(evaluate.get("fast_metrics_file", "fast_metrics_preview.json"))
+                fast_file = "fast_metrics_preview.json"
                 if not single:
                     fast_file = fast_file.replace(".json", f"{suffix}.json")
                 fast_output = run_dir / fast_file
                 fast_cmd = metric_base + [
                     "--mode", "gpu_fast",
                     "--output", str(fast_output),
-                    "--kid-subsets", str(evaluate.get("kid_subsets", 100)),
-                    "--kid-subset-size", str(evaluate.get("kid_subset_size", 1000)),
-                    "--kid-seed", str(evaluate.get("kid_seed", 2026)),
                 ]
                 fast_outputs = [fast_output]
-                if per_class_file and single:
-                    fast_per_class_file = str(
-                        evaluate.get("fast_per_class_metrics_file", "fast_per_class_fids.json")
-                    )
+                if single:
+                    fast_per_class_file = "fast_per_class_fids.json"
                     fast_per_class_output = run_dir / fast_per_class_file
                     fast_cmd += [
                         "--per-class-output", str(fast_per_class_output),
-                        "--longtail-groups", str(evaluate.get("longtail_groups", "none")),
                     ]
                     fast_outputs.append(fast_per_class_output)
                 phases.append(Phase(
@@ -360,18 +344,14 @@ class CCUAAdapter:
                     skip_if_exists=fast_outputs,
                 ))
 
-            if evaluate.get("quick_metrics_only", False):
-                continue
-
             metric_cmd = metric_base + [
                 "--mode", "detailed",
                 "--output", str(run_dir / metrics_file),
-            ] + kid_args
-            if per_class_file and single:
-                metric_cmd += ["--per-class-output", str(run_dir / per_class_file),
-                               "--longtail-groups", str(evaluate.get("longtail_groups", "none"))]
+            ]
+            if single:
+                metric_cmd += ["--per-class-output", str(run_dir / per_class_file)]
             outputs = [run_dir / metrics_file]
-            if per_class_file and single:
+            if single:
                 outputs.append(run_dir / per_class_file)
             phases.append(Phase(f"paper_metrics{suffix}", metric_cmd, self.root, skip_if_exists=outputs))
         return phases

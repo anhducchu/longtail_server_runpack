@@ -54,17 +54,7 @@ def _load_vendor_manifest(repo_root: Path) -> tuple[dict, Check]:
 
 
 def _check_metric_assets(campaign: LoadedCampaign, repo_root: Path) -> List[Check]:
-    datasets = {
-        str(task.dataset.get("data_type", ""))
-        for task in campaign.tasks
-        if task.eval.get("paper_metrics", False)
-    }
-    wanted: set[str] = set()
-    if datasets & {"cifar10", "cifar10lt"}:
-        wanted.add("cifar10")
-    if datasets & {"cifar100", "cifar100lt"}:
-        wanted.add("cifar100")
-    if not wanted:
+    if not any(task.eval.get("paper_metrics", False) for task in campaign.tasks):
         return []
 
     configured = os.environ.get("LTX_METRICS_ROOT", "").strip()
@@ -72,45 +62,42 @@ def _check_metric_assets(campaign: LoadedCampaign, repo_root: Path) -> List[Chec
     if not metrics_root.is_absolute():
         metrics_root = (campaign.root / metrics_root).resolve()
 
-    checks: List[Check] = []
     verify_hashes = _as_bool(os.environ.get("LTX_PREFLIGHT_VERIFY_ASSET_HASHES", "0"))
-    for dataset in sorted(wanted):
-        manifest_path = metrics_root / f"{dataset}.metric_manifest.json"
-        try:
-            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if payload.get("dataset") != dataset:
-                raise ValueError(f"dataset={payload.get('dataset')!r}, expected {dataset!r}")
-            if int(payload.get("num_images", -1)) != 50_000:
-                raise ValueError("balanced reference must contain 50,000 images")
-            if payload.get("repository_commit") != CCUA_COMMIT:
-                raise ValueError("metric assets were not built from the pinned CCUA source")
-            assets = (
-                ("feature_file", "feature_sha256"),
-                ("labels_file", "labels_sha256"),
-                ("fid_file", "fid_sha256"),
-                ("vgg_feature_file", "vgg_feature_sha256"),
-                ("vgg_radii_file", "vgg_radii_sha256"),
-            )
-            for file_key, hash_key in assets:
-                filename = str(payload.get(file_key, "")).strip()
-                expected_hash = str(payload.get(hash_key, "")).strip()
-                if not filename or not expected_hash:
-                    raise ValueError(f"missing {file_key}/{hash_key}")
-                path = metrics_root / filename
-                if not path.is_file():
-                    raise FileNotFoundError(path)
-                if verify_hashes and sha256_file(path) != expected_hash:
-                    raise ValueError(f"sha256 mismatch: {path}")
-        except Exception as exc:
-            checks.append(Check("ERROR", f"metric-assets:{dataset}", f"{manifest_path}: {exc}"))
-        else:
-            suffix = " with SHA-256 verification" if verify_hashes else ""
-            checks.append(Check(
-                "PASS",
-                f"metric-assets:{dataset}",
-                f"balanced FID/PRD manifest and arrays present{suffix}",
-            ))
-    return checks
+    dataset = "cifar100"
+    manifest_path = metrics_root / f"{dataset}.metric_manifest.json"
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if payload.get("dataset") != dataset:
+            raise ValueError(f"dataset={payload.get('dataset')!r}, expected {dataset!r}")
+        if int(payload.get("num_images", -1)) != 50_000:
+            raise ValueError("balanced reference must contain 50,000 images")
+        if payload.get("repository_commit") != CCUA_COMMIT:
+            raise ValueError("metric assets were not built from the pinned CCUA source")
+        assets = (
+            ("feature_file", "feature_sha256"),
+            ("labels_file", "labels_sha256"),
+            ("fid_file", "fid_sha256"),
+            ("vgg_feature_file", "vgg_feature_sha256"),
+            ("vgg_radii_file", "vgg_radii_sha256"),
+        )
+        for file_key, hash_key in assets:
+            filename = str(payload.get(file_key, "")).strip()
+            expected_hash = str(payload.get(hash_key, "")).strip()
+            if not filename or not expected_hash:
+                raise ValueError(f"missing {file_key}/{hash_key}")
+            path = metrics_root / filename
+            if not path.is_file():
+                raise FileNotFoundError(path)
+            if verify_hashes and sha256_file(path) != expected_hash:
+                raise ValueError(f"sha256 mismatch: {path}")
+    except Exception as exc:
+        return [Check("ERROR", f"metric-assets:{dataset}", f"{manifest_path}: {exc}")]
+    suffix = " with SHA-256 verification" if verify_hashes else ""
+    return [Check(
+        "PASS",
+        f"metric-assets:{dataset}",
+        f"balanced FID/PRD manifest and arrays present{suffix}",
+    )]
 
 
 def _check_native_cifar_contract(
