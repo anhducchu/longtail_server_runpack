@@ -18,7 +18,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ltx.paper_metrics import knn_radii, vgg16_fc2
+from runner.metrics import knn_radii, vgg16_fc2
 
 
 def sha256(path: Path) -> str:

@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from ltx.metrics import collect_metrics
+from runner.metrics import collect_metrics
 
 
 def test_shared_metrics_json_unwraps_to_clean_keys(tmp_path):

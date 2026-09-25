@@ -12,8 +12,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from ltx.config import LoadedCampaign, load_campaign
-from ltx.utils import load_runtime_env
+from runner.config import LoadedCampaign, load_campaign
+from runner.utils import load_runtime_env
 
 
 METRICS = ("FID", "KID", "IS", "F_8", "F_1_8", "ImprovedPrecision", "Recall")

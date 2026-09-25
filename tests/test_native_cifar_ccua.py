@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from ltx.adapters.ccua import CCUAAdapter
-from ltx.config import load_campaign
-from ltx.preflight import _check_native_cifar_contract
-from ltx.worker import wandb_config
+from runner.adapter import CCUAAdapter
+from runner.config import load_campaign
+from runner.preflight import _check_native_cifar_contract
+from runner.worker import wandb_config
 
 
 ROOT = Path(__file__).resolve().parents[1]

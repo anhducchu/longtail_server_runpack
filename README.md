@@ -10,33 +10,32 @@ Archived research code is preserved on the local branch
 
 ## Start here
 
-- To run an experiment, start at `scripts/run.sh`.
-- To read the runner, start at `src/ltx/__main__.py`, then `src/ltx/cli.py`.
+- To understand the repo, start at `main.py`.
+- To run the full server workflow, use `scripts/run.sh`.
 - To inspect training or sampling, read `third_party/CCUA-DDPM/main.py` only
   after the runner flow is clear.
 
 ```text
-scripts/run.sh
-  -> python -m ltx
-  -> cli.py
-  -> config.py
-  -> scheduler.py
-  -> worker.py
-  -> adapters/ccua.py
+main.py
+  -> runner/config.py
+  -> runner/preflight.py
+  -> runner/scheduler.py
+  -> runner/worker.py
+  -> runner/adapter.py
   -> third_party/CCUA-DDPM/main.py
-  -> tools/evaluate_ccua.py
+  -> tools/evaluate_ccua.py / tools/report_native_cifar.py
 ```
 
-`src/ltx` is deliberately a small flat package: each file owns one part of
-the execution flow, so there are no extra framework or service layers to
-traverse.
+There is no installable framework layer. `main.py` is the CLI; `runner/`
+contains only the infrastructure needed to execute and recover experiments.
 
 ## Repository map
 
 | Path | Purpose |
 | --- | --- |
+| `main.py` | Single CLI entrypoint: plan, preflight, run, status, retry, stop |
 | `configs/` | Main 9-task campaign, seed-0 T2H comparison, smoke, and server policy |
-| `src/ltx/` | CLI, config loading, preflight, scheduling, workers, retries, and metrics |
+| `runner/` | Config, preflight, scheduling, worker, state, adapter, and metrics |
 | `third_party/CCUA-DDPM/` | Baseline-only CIFAR-100 trainer, sampler, and metric host |
 | `tools/` | Metric-asset preparation, shared evaluation, and final report |
 | `scripts/` | One local runner, bootstrap, and Slurm entrypoint |
@@ -71,8 +70,8 @@ Plan and preflight without launching:
 ```bash
 bash scripts/bootstrap.sh
 source .venv/bin/activate
-python -m ltx plan --config configs/native_cifar100_if100.yaml
-python -m ltx preflight --config configs/native_cifar100_if100.yaml
+python main.py plan --config configs/native_cifar100_if100.yaml
+python main.py preflight --config configs/native_cifar100_if100.yaml
 ```
 
 Run the main campaign or the seed-0 T2H comparison:
@@ -84,7 +83,8 @@ bash scripts/run.sh configs/native_cifar100_if100_seed0.yaml
 
 `scripts/run.sh` selects or creates the CUDA environment, bootstraps the local
 venv, prepares missing CIFAR metric assets, launches the scheduler, and writes
-the report. CLI flags after the optional config path pass through to `ltx run`:
+the report. CLI flags after the optional config path pass through to
+`main.py run`:
 
 ```bash
 bash scripts/run.sh --gpus 0,1,2,3 --per-gpu auto --jobs auto
@@ -102,17 +102,17 @@ sbatch scripts/submit_slurm.sh configs/native_cifar100_if100_seed0.yaml
 The CLI replaces per-command shell wrappers:
 
 ```bash
-python -m ltx status --config configs/native_cifar100_if100.yaml
-python -m ltx status --watch 20 --config configs/native_cifar100_if100.yaml
-python -m ltx retry-failed --config configs/native_cifar100_if100.yaml
-python -m ltx stop --config configs/native_cifar100_if100.yaml
+python main.py status --config configs/native_cifar100_if100.yaml
+python main.py status --watch 20 --config configs/native_cifar100_if100.yaml
+python main.py retry-failed --config configs/native_cifar100_if100.yaml
+python main.py stop --config configs/native_cifar100_if100.yaml
 ```
 
 Rerunning the same campaign resumes from the newest complete local checkpoint.
 To resume one row from an explicitly named full-state checkpoint:
 
 ```bash
-python -m ltx run \
+python main.py run \
   --config configs/native_cifar100_if100.yaml \
   --resume-method ddpm --resume-seed 0 \
   --resume-checkpoint /absolute/path/ckpt_250000.pt

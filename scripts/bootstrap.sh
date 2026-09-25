@@ -19,9 +19,8 @@ python -m pip install --upgrade "pip<26" "setuptools<82" wheel
 if [[ "$INSTALL_REPO_DEPS" == "1" ]]; then
   # Preserve the server's CUDA/PyTorch installation; those packages are owned
   # by environment.yml rather than pip.
-  python -m pip install -r "$ROOT/requirements.runpack.txt"
+  python -m pip install -r "$ROOT/requirements.txt"
 fi
-python -m pip install --no-deps -e .
 
 if [[ ! -f "$REPOS_ROOT/THIRD_PARTY_MANIFEST.json" ]]; then
   echo "[bootstrap] missing third_party/THIRD_PARTY_MANIFEST.json; refusing an unverifiable vendor tree." >&2
@@ -65,4 +64,4 @@ PY
 mkdir -p "${LTX_RUNS_ROOT:-$ROOT/runs}" "${LTX_DATA_ROOT:-$ROOT/data}" "$ROOT/wandb"
 
 echo
-printf 'Bootstrap complete. The runner reads this runpack\047s .env.local.\n  source %q\n  python -m ltx preflight --config configs/native_cifar100_if100.yaml\n  bash scripts/run.sh\n' "$VENV/bin/activate"
+printf 'Bootstrap complete. The runner reads this runpack\047s .env.local.\n  source %q\n  python main.py preflight --config configs/native_cifar100_if100.yaml\n  bash scripts/run.sh\n' "$VENV/bin/activate"

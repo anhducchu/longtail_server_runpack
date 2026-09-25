@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from ltx.config import load_campaign
+from runner.config import load_campaign
 
 
 ROOT = Path(__file__).resolve().parents[1]

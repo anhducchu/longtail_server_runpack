@@ -1,4 +1,4 @@
-# Runtime and verification dependencies for the baseline runpack. PyTorch and
+# Runtime and test dependencies for the baseline runpack. PyTorch and
 # torchvision remain owned by the CUDA/conda environment.
 absl-py==2.1.0
 scipy==1.13.1

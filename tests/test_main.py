@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -7,15 +6,10 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_python_module_entrypoint_exposes_the_cli():
-    env = os.environ.copy()
-    env["PYTHONPATH"] = os.pathsep.join(
-        filter(None, (str(ROOT / "src"), env.get("PYTHONPATH", "")))
-    )
+def test_main_script_exposes_the_cli():
     result = subprocess.run(
-        [sys.executable, "-m", "ltx", "--help"],
+        [sys.executable, "main.py", "--help"],
         cwd=ROOT,
-        env=env,
         check=False,
         capture_output=True,
         text=True,

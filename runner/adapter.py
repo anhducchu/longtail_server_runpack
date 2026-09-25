@@ -4,16 +4,95 @@ import math
 import os
 import re
 import shlex
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List, Mapping
 
-from .base import Adapter, Phase, resolve_inception_batch_size, resolve_num_workers
-from ..checkpoints import get_resume_checkpoint, get_resume_step
-from ..config import Task
+from .config import Task
 
 
-class CCUAAdapter(Adapter):
-    """Contrastive Conditional-Unconditional Alignment (arXiv:2507.09052).
+def resolve_num_workers(train: Dict, default: int) -> int:
+    """Reduce dataloader workers when several tasks share one machine."""
+    override = os.environ.get("LTX_NUM_WORKERS")
+    if override:
+        try:
+            return int(override)
+        except ValueError:
+            pass
+    return int(train.get("num_workers", default))
+
+
+def resolve_inception_batch_size(evaluate: Dict, default: int = 16) -> int:
+    """Validate the evaluator's GPU micro-batch."""
+    value = int(evaluate.get("inception_batch_size", default))
+    if value <= 0:
+        raise ValueError(f"inception_batch_size must be positive, got {value}")
+    return value
+
+
+@dataclass
+class Phase:
+    name: str
+    command: List[str]
+    cwd: Path
+    env: Dict[str, str] = field(default_factory=dict)
+    skip_if_exists: List[Path] = field(default_factory=list)
+
+
+_CHECKPOINT_NAME = re.compile(r"^ckpt_(\d+)\.pt$")
+
+
+def get_resume_checkpoint(
+    train: Mapping[str, Any], method_config: Mapping[str, Any] | None = None
+) -> Path | None:
+    """Resolve an explicitly configured full-state checkpoint."""
+    values: dict[str, Any] = dict(train)
+    if method_config:
+        for key in ("resume_checkpoint", "resume_step"):
+            if key in method_config:
+                values[key] = method_config[key]
+    raw_path = str(values.get("resume_checkpoint", "") or "").strip()
+    if not raw_path:
+        return None
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        path = path.resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"explicit resume checkpoint does not exist: {path}")
+    return path
+
+
+def get_resume_step(
+    train: Mapping[str, Any],
+    method_config: Mapping[str, Any] | None,
+    checkpoint: Path,
+) -> int:
+    """Read the completed update from config or a ``ckpt_<step>.pt`` name."""
+    values: dict[str, Any] = dict(train)
+    if method_config and "resume_step" in method_config:
+        values["resume_step"] = method_config["resume_step"]
+    raw_step = str(values.get("resume_step", "") or "").strip()
+    if raw_step:
+        try:
+            step = int(raw_step)
+        except ValueError as exc:
+            raise ValueError(
+                f"resume_step must be an integer, got {raw_step!r} for {checkpoint}"
+            ) from exc
+    else:
+        match = _CHECKPOINT_NAME.fullmatch(checkpoint.name)
+        if not match:
+            raise ValueError(
+                f"cannot infer resume step from {checkpoint.name!r}; set resume_step explicitly"
+            )
+        step = int(match.group(1))
+    if step < 0:
+        raise ValueError(f"resume_step must be non-negative, got {step}")
+    return step
+
+
+class CCUAAdapter:
+    """Build train/evaluation commands for the shared CCUA-DDPM host.
 
     Upstream ships two pipelines; this drives ``CCUA-DDPM``, the U-Net one, whose
     flag defaults already match the unified backbone (ch=128, [1,2,2,2], attn[1],
@@ -29,6 +108,13 @@ class CCUAAdapter(Adapter):
     """
 
     DEFAULT_CHECKPOINT_INTERVAL_STEPS = 25_000
+
+    def __init__(self, root: Path):
+        self.root = root
+
+    def repo_dir(self, task: Task) -> Path:
+        path = Path(task.repository["directory"])
+        return path if path.is_absolute() else Path(task.runtime["repos_root"]) / path
 
     @staticmethod
     def latest(run_dir: Path, target: int) -> int | None:
@@ -223,7 +309,7 @@ class CCUAAdapter(Adapter):
             if not single:
                 metrics_file = metrics_file.replace(".json", f"{suffix}.json")
             metric_base = [
-                py, str(self.root / "tools" / "evaluate_ccua.py"),
+                py, "-m", "tools.evaluate_ccua",
                 "--repo", str(repo),
                 "--data-type", str(task.dataset["data_type"]),
                 "--samples", str(samples), "--labels", str(labels),

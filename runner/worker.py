@@ -14,7 +14,7 @@ from typing import Dict, Optional
 
 import psutil
 
-from .adapters import make_adapter
+from .adapter import CCUAAdapter
 from .config import Task
 from .gpu import query_compute_apps
 from .metrics import collect_metrics, latest_tensorboard_scalars
@@ -164,7 +164,7 @@ def define_wandb_metrics(wb_run) -> None:
             wb_run.define_metric(name, summary="last", goal=goal)
         wb_run.define_metric("generation/tail/*", summary="last", goal="minimize")
     except Exception as exc:
-        print(f"[ltx] could not define W&B metric axes: {exc}", flush=True)
+        print(f"[runner] could not define W&B metric axes: {exc}", flush=True)
 
 
 def _resolve_wandb_run_identity(task: Task, run_dir: Path) -> tuple[str, str]:
@@ -232,7 +232,7 @@ def init_wandb(task: Task, run_dir: Path):
                 "fix WANDB_API_KEY/network/project settings or explicitly set WANDB_MODE=offline "
                 "or disabled for a run without remote logging"
             ) from exc
-        print(f"[ltx] W&B unavailable in mode={mode}: {exc}", flush=True)
+        print(f"[runner] W&B unavailable in mode={mode}: {exc}", flush=True)
         return None
 
 
@@ -246,13 +246,13 @@ def run_phase(phase, env: Dict[str, str], log_path: Path, state: StateDB, task_i
               progress_seconds: float = 30.0) -> int:
     outputs_exist = phase.skip_if_exists and all(path.exists() for path in phase.skip_if_exists)
     if outputs_exist:
-        print(f"[ltx] skip phase={phase.name}; outputs exist", flush=True)
+        print(f"[runner] skip phase={phase.name}; outputs exist", flush=True)
         return 0
     phase_env = os.environ.copy()
     phase_env.update(env)
     phase_env.update(phase.env)
     command_text = shell_join(phase.command)
-    print(f"[ltx] phase={phase.name} cwd={phase.cwd}\n[ltx] command={command_text}", flush=True)
+    print(f"[runner] phase={phase.name} cwd={phase.cwd}\n[runner] command={command_text}", flush=True)
     state.heartbeat(task_id, f"phase={phase.name}")
     if wb_run is not None:
         # The resolved command belongs in config (provenance a reader checks
@@ -324,7 +324,7 @@ def run_phase(phase, env: Dict[str, str], log_path: Path, state: StateDB, task_i
             raise
         finally:
             if suppressed:
-                note = f"[ltx] suppressed {suppressed} progress redraws (one kept per {progress_seconds:g}s)\n"
+                note = f"[runner] suppressed {suppressed} progress redraws (one kept per {progress_seconds:g}s)\n"
                 sys.stdout.write(note)
                 log.write(note)
             log.flush()
@@ -390,7 +390,7 @@ def main() -> None:
     attempt = int(row.get("attempt", 1))
     if attempt > 1:
         print(
-            f"[ltx] recovery attempt={attempt} task={task.id}; "
+            f"[runner] recovery attempt={attempt} task={task.id}; "
             "adapter will resume the newest complete checkpoint",
             flush=True,
         )
@@ -424,7 +424,9 @@ def main() -> None:
 
         monitor = Monitor(task.id, run_dir, args.gpu, state, wb_run, interval=int(task.runtime.get("log_system_every_seconds", 30)))
         monitor.start()
-        adapter = make_adapter(task.adapter, Path(args.root))
+        if task.adapter != "ccua":
+            raise ValueError(f"unsupported adapter: {task.adapter}")
+        adapter = CCUAAdapter(Path(args.root))
         phases = adapter.phases(task, batch_size=batch_size)
         # Vendored trainers may call wandb.init with hardcoded settings during
         # --train, disconnected from this task's run (wrong

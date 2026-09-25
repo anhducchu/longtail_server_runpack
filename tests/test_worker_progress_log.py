@@ -3,7 +3,7 @@ import sys
 import types
 from pathlib import Path
 
-from ltx.worker import run_phase
+from runner.worker import run_phase
 
 
 class FakeState:

@@ -1,4 +1,4 @@
-from ltx.gpu import GPU, plan_slots
+from runner.gpu import GPU, plan_slots
 
 
 def make_gpu(index, free_mb):

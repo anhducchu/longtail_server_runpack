@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import torch
 
-from ltx import paper_metrics
+from runner import metrics as paper_metrics
 
 
 def _numpy_radii(features: np.ndarray, k: int) -> np.ndarray:

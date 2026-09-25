@@ -1,3 +1,5 @@
+"""Plan, validate, run, and inspect the baseline experiments."""
+
 from __future__ import annotations
 
 import argparse
@@ -10,11 +12,11 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from .config import load_campaign
-from .preflight import run_preflight
-from .scheduler import Scheduler
-from .state import StateDB
-from .utils import load_runtime_env
+from runner.config import load_campaign
+from runner.preflight import run_preflight
+from runner.scheduler import Scheduler
+from runner.state import StateDB
+from runner.utils import load_runtime_env
 
 
 DEFAULT_CONFIG = "configs/native_cifar100_if100.yaml"
@@ -209,7 +211,7 @@ def _int_or_auto(value: str):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="ltx")
+    parser = argparse.ArgumentParser(prog="python main.py")
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("preflight", "plan", "stop"):
         command = sub.add_parser(name)

@@ -27,7 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ltx.paper_metrics import improved_prd_vgg16_k3, polynomial_mmd_kid, polynomial_mmd_kid_gpu
+from runner.metrics import improved_prd_vgg16_k3, polynomial_mmd_kid, polynomial_mmd_kid_gpu
 
 
 _IS_SPLITS = 10

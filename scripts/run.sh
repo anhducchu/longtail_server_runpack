@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Bootstrap and launch one campaign. The first positional argument may be a
-# config path; remaining arguments are passed to `ltx run`.
+# config path; remaining arguments are passed to `main.py run`.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -52,7 +52,7 @@ source "${LTX_VENV:-$ROOT/.venv}/bin/activate"
 read -r campaign_name protocol < <(
   python - "$CONFIG" <<'PY'
 import sys
-from ltx.config import load_campaign
+from runner.config import load_campaign
 
 campaign = load_campaign(sys.argv[1]).raw.get("campaign", {})
 print(campaign.get("name", "campaign"), campaign.get("protocol", "none"))
@@ -70,7 +70,7 @@ echo "[run] runs_root=$runs_root log=$run_log"
 
 if [[ "$protocol" == native_cifar_v1 ]]; then
   repos_root="${LTX_REPOS_ROOT:-$ROOT/third_party}"
-  python tools/prepare_cifar_metric_assets.py \
+  python -m tools.prepare_cifar_metric_assets \
     --repo "$repos_root/CCUA-DDPM" \
     --data-root "${LTX_DATA_ROOT:-$ROOT/data}" \
     --output "${LTX_METRICS_ROOT:-$repos_root/CCUA-DDPM/stats}" \
@@ -84,11 +84,11 @@ run_args=(--config "$CONFIG")
 run_args+=("$@")
 
 set +e
-python -m ltx run "${run_args[@]}"
+python main.py run "${run_args[@]}"
 campaign_status=$?
 report_status=0
 if [[ "$protocol" == native_cifar_v1 ]]; then
-  python tools/report_native_cifar.py --config "$CONFIG" --wandb
+  python -m tools.report_native_cifar --config "$CONFIG" --wandb
   report_status=$?
 fi
 set -e

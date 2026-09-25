@@ -42,7 +42,7 @@ class Scheduler:
 
     def _signal(self, signum, frame):
         self.stop_requested = True
-        print(f"[ltx] scheduler received signal {signum}; no new jobs will be started", flush=True)
+        print(f"[runner] scheduler received signal {signum}; no new jobs will be started", flush=True)
 
     def _allowed_gpus(self) -> List[int]:
         configured = self.campaign.server.get("machine", {}).get("gpu_ids", "auto")
@@ -98,7 +98,7 @@ class Scheduler:
             running_on=running_on if running_on is not None else self._running_on(),
         )
         if slots != self._last_printed_slots:
-            print(f"[ltx] gpu slots={slots} task_memory_estimate_gb={task_memory_gb:.1f}", flush=True)
+            print(f"[runner] gpu slots={slots} task_memory_estimate_gb={task_memory_gb:.1f}", flush=True)
             self._last_printed_slots = dict(slots)
         self._current_slots = slots
         return slots
@@ -133,7 +133,7 @@ class Scheduler:
         limit = float(self.campaign.server.get("machine", {}).get("disk_stop_free_gb", 0))
         free = shutil.disk_usage(self.campaign_dir).free / (1024 ** 3)
         if free < limit:
-            print(f"[ltx] disk guard: only {free:.1f} GB free (< {limit:.1f} GB); pausing launch", flush=True)
+            print(f"[runner] disk guard: only {free:.1f} GB free (< {limit:.1f} GB); pausing launch", flush=True)
             return False
         return True
 
@@ -147,7 +147,7 @@ class Scheduler:
 
     def _launch(self, task_id: str, gpu_id: int) -> None:
         command = [
-            sys.executable, "-m", "ltx.worker",
+            sys.executable, "-m", "runner.worker",
             "--state", str(self.state_path), "--task", task_id,
             "--gpu", str(gpu_id), "--root", str(self.campaign.root),
         ]
@@ -163,7 +163,7 @@ class Scheduler:
         self.processes[task_id] = proc
         self.launcher_logs[task_id] = log
         self._last_launch_on_gpu[gpu_id] = time.time()
-        print(f"[ltx] launched task={task_id} gpu={gpu_id} pid={proc.pid}", flush=True)
+        print(f"[runner] launched task={task_id} gpu={gpu_id} pid={proc.pid}", flush=True)
 
     def _reap(self) -> None:
         finished = []
@@ -171,7 +171,7 @@ class Scheduler:
             code = proc.poll()
             if code is not None:
                 finished.append((task_id, code))
-                print(f"[ltx] worker exited task={task_id} code={code}", flush=True)
+                print(f"[runner] worker exited task={task_id} code={code}", flush=True)
         for task_id, code in finished:
             # A SIGKILL can terminate the worker before its exception handler
             # writes a terminal state.  Preserve the observed exit code and
@@ -193,7 +193,7 @@ class Scheduler:
                 status = self.state.recover_worker_exit(
                     task_id, code, f"Worker exited before updating state (exit {code})",
                 )
-                print(f"[ltx] worker state task={task_id} status={status} code={code}", flush=True)
+                print(f"[runner] worker state task={task_id} status={status} code={code}", flush=True)
             self.processes.pop(task_id, None)
             handle = self.launcher_logs.pop(task_id, None)
             if handle is not None:
@@ -207,18 +207,18 @@ class Scheduler:
         poll = int(machine.get("poll_seconds", 20))
         allowed = self._allowed_gpus()
         if not allowed:
-            print("[ltx] no NVIDIA GPUs detected", flush=True)
+            print("[runner] no NVIDIA GPUs detected", flush=True)
             return 2
         max_concurrent_cfg = machine.get("max_concurrent", "auto")
         initial_slots = self._compute_slots()
         display_cap = f"auto({sum(initial_slots.values())})" if max_concurrent_cfg == "auto" else max_concurrent_cfg
-        print(f"[ltx] campaign={self.campaign.raw['campaign']['name']} GPUs={allowed} max_concurrent={display_cap}", flush=True)
+        print(f"[runner] campaign={self.campaign.raw['campaign']['name']} GPUs={allowed} max_concurrent={display_cap}", flush=True)
 
         while True:
             self._reap()
             recovered = self.state.reset_stale_running()
             if recovered:
-                print(f"[ltx] recovered {recovered} stale worker(s)", flush=True)
+                print(f"[runner] recovered {recovered} stale worker(s)", flush=True)
             rows = self.state.rows()
             if rows and all(r["status"] in TERMINAL for r in rows):
                 break
@@ -241,6 +241,6 @@ class Scheduler:
         rows = self.state.rows()
         completed = sum(r["status"] == "completed" for r in rows)
         failed = sum(r["status"] == "failed" for r in rows)
-        print(f"[ltx] campaign finished completed={completed} failed={failed} total={len(rows)}", flush=True)
+        print(f"[runner] campaign finished completed={completed} failed={failed} total={len(rows)}", flush=True)
         self.state.close()
         return 1 if failed else 0

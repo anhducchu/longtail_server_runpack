@@ -1,5 +1,5 @@
-from ltx.config import Task
-from ltx.worker import resolve_batch_size
+from runner.config import Task
+from runner.worker import resolve_batch_size
 
 
 def make_task(metric_protocol, batch_size=64, oom_sizes=(128, 96, 64, 48, 32)):
