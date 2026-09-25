@@ -106,6 +106,11 @@ Markdown trong output. `Class-valid` được để `N/A` nếu chưa cung cấp
 CIFAR-100 classifier độc lập; requested conditioning label không được coi là
 bằng chứng ảnh đúng lớp.
 
+Để chạy đồng thời năm condition trên cùng GPU, mở năm process `fixed-condition`
+với cùng config, checkpoint và `--name`; mỗi process nhận một trong các tên
+`pf_ode`, `reduced_025`, `reduced_05`, `standard_sde`, `increased_2`. Sau khi cả
+năm kết thúc, chạy `fixed-evaluate` một lần để evaluate tuần tự và ghép bảng.
+
 ## Tiêu chí đọc kết quả
 
 - Primary: Few-class FID của `learned` tốt hơn `rho_1` trên paired seeds.

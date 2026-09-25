@@ -23,8 +23,8 @@ model:
   attention_levels: [1]
   residual_blocks: 2
   dropout: 0.1
-  # H100 80 GB: score the full sampling batch while retaining shared-job headroom.
-  microbatch: 512
+  # Five parallel workers fit beside the other shared H100 jobs at this size.
+  microbatch: 256
 
 # Required by the shared config schema; fixed-sweep never uses these values.
 training:
@@ -46,7 +46,7 @@ training:
 
 sampling:
   num_images: 50000
-  batch_size: 512
+  batch_size: 256
   stride: 10
   seed: 20260926
 

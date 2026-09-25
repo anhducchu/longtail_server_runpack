@@ -10,7 +10,7 @@ from scaffold.core import (
     reverse_sample,
 )
 from scaffold.common import OUTPUTS_ROOT, load_frozen_score, output_directory
-from scaffold.sample import FIXED_SWEEP, write_fixed_sweep_table
+from scaffold.sample import FIXED_SWEEP, fixed_sweep_conditions, write_fixed_sweep_table
 from scaffold.train import training_signature
 
 
@@ -143,6 +143,12 @@ def test_loads_ema_checkpoint_and_freezes_every_score_parameter(tmp_path):
 
 def test_fixed_sweep_has_the_requested_five_ratios():
     assert [rho for _name, _label, rho in FIXED_SWEEP] == [0.0, 0.25, 0.5, 1.0, 2.0]
+
+
+def test_fixed_sweep_can_select_one_parallel_worker_condition():
+    assert fixed_sweep_conditions("reduced_05") == (("reduced_05", "Reduced", 0.5),)
+    with pytest.raises(ValueError, match="unknown fixed-sweep condition"):
+        fixed_sweep_conditions("missing")
 
 
 def test_fixed_sweep_table_reads_canonical_metric_artifacts(tmp_path):

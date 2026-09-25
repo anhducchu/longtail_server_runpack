@@ -36,6 +36,19 @@ FIXED_SWEEP = (
 )
 
 
+def fixed_sweep_conditions(
+    condition: str | None = None,
+) -> tuple[tuple[str, str, float], ...]:
+    """Return the full sweep or one named condition for parallel workers."""
+    if condition is None:
+        return FIXED_SWEEP
+    selected = tuple(row for row in FIXED_SWEEP if row[0] == condition)
+    if not selected:
+        valid = ", ".join(row[0] for row in FIXED_SWEEP)
+        raise ValueError(f"unknown fixed-sweep condition {condition!r}; choose from {valid}")
+    return selected
+
+
 def load_trained_scaffold(
     path: Path,
     source_sha256: str,
@@ -222,8 +235,9 @@ def sample_fixed_sweep(
     config: dict[str, Any],
     output: Path,
     device: torch.device,
+    condition: str | None = None,
 ) -> None:
-    """Generate five fixed A/A0 conditions without training any parameter."""
+    """Generate all fixed A/A0 conditions, or one parallel-worker condition."""
     _, _, counts_array = load_training_data(config)
     counts = torch.as_tensor(counts_array, device=device)
     number_of_classes = int(config["dataset"]["num_classes"])
@@ -237,9 +251,9 @@ def sample_fixed_sweep(
         float(diffusion["beta_T"]),
         device=device,
     )
-    for condition, _label, rho in FIXED_SWEEP:
+    for condition_name, _label, rho in fixed_sweep_conditions(condition):
         generate_condition(
-            condition=condition,
+            condition=condition_name,
             model=model,
             scaffold=None,
             rho_override=rho,

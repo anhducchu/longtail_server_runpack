@@ -56,6 +56,12 @@ def run(args: argparse.Namespace) -> None:
     if args.command == "evaluate":
         evaluate_conditions(config, output)
         return
+    if args.command == "fixed-evaluate":
+        fixed_conditions = tuple(condition for condition, _label, _rho in FIXED_SWEEP)
+        evaluate_conditions(config, output, fixed_conditions)
+        result = write_fixed_sweep_table(output)
+        print(f"[result] {result}")
+        return
 
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
@@ -94,6 +100,16 @@ def run(args: argparse.Namespace) -> None:
         evaluate_conditions(config, output, fixed_conditions)
         result = write_fixed_sweep_table(output)
         print(f"[result] {result}")
+    if args.command == "fixed-condition":
+        sample_fixed_sweep(
+            score_model,
+            score_checkpoint,
+            score_sha256,
+            config,
+            output,
+            device,
+            condition=args.condition,
+        )
     if args.command == "all" and bool(config["evaluation"].get("enabled", False)):
         evaluate_conditions(config, output)
 
@@ -116,7 +132,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "command",
-        choices=("plan", "train", "sample", "evaluate", "all", "fixed-sweep"),
+        choices=(
+            "plan",
+            "train",
+            "sample",
+            "evaluate",
+            "all",
+            "fixed-sweep",
+            "fixed-condition",
+            "fixed-evaluate",
+        ),
     )
     parser.add_argument(
         "--config",
@@ -126,7 +151,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--name", help="output subdirectory below scaffold/outputs")
     parser.add_argument("--device", default="cuda")
-    return parser.parse_args()
+    parser.add_argument(
+        "--condition",
+        choices=tuple(condition for condition, _label, _rho in FIXED_SWEEP),
+        help="single fixed-sweep row; only valid with fixed-condition",
+    )
+    args = parser.parse_args()
+    if args.command == "fixed-condition" and args.condition is None:
+        parser.error("fixed-condition requires --condition")
+    if args.command != "fixed-condition" and args.condition is not None:
+        parser.error("--condition is only valid with fixed-condition")
+    return args
 
 
 def main() -> None:
