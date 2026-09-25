@@ -23,7 +23,8 @@ model:
   attention_levels: [1]
   residual_blocks: 2
   dropout: 0.1
-  microbatch: 64
+  # H100 80 GB: score the full sampling batch while retaining shared-job headroom.
+  microbatch: 512
 
 # Required by the shared config schema; fixed-sweep never uses these values.
 training:
@@ -45,7 +46,7 @@ training:
 
 sampling:
   num_images: 50000
-  batch_size: 64
+  batch_size: 512
   stride: 10
   seed: 20260926
 
@@ -53,4 +54,4 @@ evaluation:
   enabled: true
   metrics_root: "${LTX_METRICS_ROOT:-third_party/CCUA-DDPM/stats}"
   device: cuda
-  inception_batch_size: 64
+  inception_batch_size: 128
