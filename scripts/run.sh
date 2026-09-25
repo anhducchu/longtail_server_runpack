@@ -84,7 +84,7 @@ run_args=(--config "$CONFIG")
 run_args+=("$@")
 
 set +e
-python -m ltx.cli run "${run_args[@]}"
+python -m ltx run "${run_args[@]}"
 campaign_status=$?
 report_status=0
 if [[ "$protocol" == native_cifar_v1 ]]; then

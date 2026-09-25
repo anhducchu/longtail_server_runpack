@@ -8,12 +8,35 @@ objective or runtime host is rejected before launch.
 Archived research code is preserved on the local branch
 `archive/research-wip-20260922`; it is not part of the `main` runtime.
 
-## What is tracked
+## Start here
+
+- To run an experiment, start at `scripts/run.sh`.
+- To read the runner, start at `src/ltx/__main__.py`, then `src/ltx/cli.py`.
+- To inspect training or sampling, read `third_party/CCUA-DDPM/main.py` only
+  after the runner flow is clear.
+
+```text
+scripts/run.sh
+  -> python -m ltx
+  -> cli.py
+  -> config.py
+  -> scheduler.py
+  -> worker.py
+  -> adapters/ccua.py
+  -> third_party/CCUA-DDPM/main.py
+  -> tools/evaluate_ccua.py
+```
+
+`src/ltx` is deliberately a small flat package: each file owns one part of
+the execution flow, so there are no extra framework or service layers to
+traverse.
+
+## Repository map
 
 | Path | Purpose |
 | --- | --- |
 | `configs/` | Main 9-task campaign, seed-0 T2H comparison, smoke, and server policy |
-| `ltx/` | Planning, preflight, scheduling, retries, and W&B collection |
+| `src/ltx/` | CLI, config loading, preflight, scheduling, workers, retries, and metrics |
 | `third_party/CCUA-DDPM/` | Baseline-only CIFAR-100 trainer, sampler, and metric host |
 | `tools/` | Metric-asset preparation, shared evaluation, and final report |
 | `scripts/` | One local runner, bootstrap, and Slurm entrypoint |
@@ -48,8 +71,8 @@ Plan and preflight without launching:
 ```bash
 bash scripts/bootstrap.sh
 source .venv/bin/activate
-python -m ltx.cli plan --config configs/native_cifar100_if100.yaml
-python -m ltx.cli preflight --config configs/native_cifar100_if100.yaml
+python -m ltx plan --config configs/native_cifar100_if100.yaml
+python -m ltx preflight --config configs/native_cifar100_if100.yaml
 ```
 
 Run the main campaign or the seed-0 T2H comparison:
@@ -79,17 +102,17 @@ sbatch scripts/submit_slurm.sh configs/native_cifar100_if100_seed0.yaml
 The CLI replaces per-command shell wrappers:
 
 ```bash
-python -m ltx.cli status --config configs/native_cifar100_if100.yaml
-python -m ltx.cli status --watch 20 --config configs/native_cifar100_if100.yaml
-python -m ltx.cli retry-failed --config configs/native_cifar100_if100.yaml
-python -m ltx.cli stop --config configs/native_cifar100_if100.yaml
+python -m ltx status --config configs/native_cifar100_if100.yaml
+python -m ltx status --watch 20 --config configs/native_cifar100_if100.yaml
+python -m ltx retry-failed --config configs/native_cifar100_if100.yaml
+python -m ltx stop --config configs/native_cifar100_if100.yaml
 ```
 
 Rerunning the same campaign resumes from the newest complete local checkpoint.
 To resume one row from an explicitly named full-state checkpoint:
 
 ```bash
-python -m ltx.cli run \
+python -m ltx run \
   --config configs/native_cifar100_if100.yaml \
   --resume-method ddpm --resume-seed 0 \
   --resume-checkpoint /absolute/path/ckpt_250000.pt

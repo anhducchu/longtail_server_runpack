@@ -7,15 +7,10 @@ import csv
 import json
 import math
 import statistics
-import sys
 import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
-
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 from ltx.config import LoadedCampaign, load_campaign
 from ltx.utils import load_runtime_env

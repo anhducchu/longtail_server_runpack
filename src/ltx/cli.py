@@ -17,6 +17,9 @@ from .state import StateDB
 from .utils import load_runtime_env
 
 
+DEFAULT_CONFIG = "configs/native_cifar100_if100.yaml"
+
+
 def campaign_state(campaign):
     return Path(campaign.server["runtime"]["runs_root"]) / campaign.raw["campaign"]["name"] / "state.sqlite"
 
@@ -147,7 +150,9 @@ def cmd_status(args) -> int:
         if not path.exists():
             print("No state database yet.")
             return 1
-        db = StateDB(path); rows = db.rows(); counts = Counter(r["status"] for r in rows)
+        db = StateDB(path)
+        rows = db.rows()
+        counts = Counter(row["status"] for row in rows)
         if getattr(args, "watch", 0):
             print("\033[2J\033[H", end="")
         print("  ".join(f"{k}={v}" for k, v in sorted(counts.items())))
@@ -157,15 +162,22 @@ def cmd_status(args) -> int:
             print(f"{row['status'][:10]:10} {str(row.get('gpu_id') if row.get('gpu_id') is not None else '-'):4} "
                   f"{row['attempt']:3d} {task['stage'][:31]:31} {task['method'][:15]:15} {task['seed']:4d} {(row.get('message') or '')[:80]}")
         db.close()
-        if not getattr(args, "watch", 0): return 0
-        if rows and all(r["status"] in {"completed","failed","skipped"} for r in rows): return 0
+        if not getattr(args, "watch", 0):
+            return 0
+        if rows and all(row["status"] in {"completed", "failed", "skipped"} for row in rows):
+            return 0
         time.sleep(args.watch)
 
 
 def cmd_retry_failed(args) -> int:
-    campaign = load_campaign(args.config); path = campaign_state(campaign)
-    if not path.exists(): print("No state database yet."); return 1
-    db = StateDB(path); n = db.retry_failed(getattr(args, "stage", None)); db.close()
+    campaign = load_campaign(args.config)
+    path = campaign_state(campaign)
+    if not path.exists():
+        print("No state database yet.")
+        return 1
+    db = StateDB(path)
+    n = db.retry_failed(getattr(args, "stage", None))
+    db.close()
     print(f"Requeued {n} failed task(s).")
     return 0
 
@@ -192,27 +204,32 @@ def cmd_stop(args) -> int:
     return 0
 
 
-def main() -> None:
-    root = Path.cwd()
-    load_runtime_env(root)
+def _int_or_auto(value: str):
+    return value if value == "auto" else int(value)
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ltx")
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("preflight", "plan", "stop"):
-        p = sub.add_parser(name); p.add_argument("--config", default="configs/native_cifar100_if100.yaml")
-    status = sub.add_parser("status"); status.add_argument("--config", default="configs/native_cifar100_if100.yaml")
+        command = sub.add_parser(name)
+        command.add_argument("--config", default=DEFAULT_CONFIG)
+
+    status = sub.add_parser("status")
+    status.add_argument("--config", default=DEFAULT_CONFIG)
     status.add_argument("--watch", type=int, default=0, help="refresh every N seconds")
-    retry_failed = sub.add_parser("retry-failed"); retry_failed.add_argument("--config", default="configs/native_cifar100_if100.yaml")
+
+    retry_failed = sub.add_parser("retry-failed")
+    retry_failed.add_argument("--config", default=DEFAULT_CONFIG)
     retry_failed.add_argument("--stage", default=None)
-    def int_or_auto(value: str):
-        return value if value == "auto" else int(value)
 
     run = sub.add_parser("run")
-    run.add_argument("--config", default="configs/native_cifar100_if100.yaml")
+    run.add_argument("--config", default=DEFAULT_CONFIG)
     run.add_argument("--skip-preflight", action="store_true")
     run.add_argument("--gpus", default=None, help="comma-separated GPU indices, e.g. 0,1,2,3 (default: all detected)")
-    run.add_argument("--per-gpu", dest="per_gpu", type=int_or_auto, default=None,
+    run.add_argument("--per-gpu", dest="per_gpu", type=_int_or_auto, default=None,
                       help="tasks per GPU: an integer, or 'auto' to pack by free VRAM (default: config's machine.tasks_per_gpu)")
-    run.add_argument("--jobs", type=int_or_auto, default=None,
+    run.add_argument("--jobs", type=_int_or_auto, default=None,
                       help="cap on total concurrent tasks across all GPUs, or 'auto' (default: config's machine.max_concurrent)")
     run.add_argument("--resume-checkpoint", default=None,
                      help="explicit checkpoint path; may contain {seed}/{method} (requires --resume-method)")
@@ -224,7 +241,12 @@ def main() -> None:
                      help="one campaign stage to resume when a method occurs in multiple stages")
     run.add_argument("--resume-step", type=int, default=None,
                      help="completed update number when the checkpoint filename is not ckpt_<step>.pt")
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> None:
+    load_runtime_env(Path.cwd())
+    args = build_parser().parse_args()
     handlers = {
         "preflight": cmd_preflight, "plan": cmd_plan, "run": cmd_run,
         "status": cmd_status, "stop": cmd_stop, "retry-failed": cmd_retry_failed,

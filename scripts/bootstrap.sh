@@ -65,4 +65,4 @@ PY
 mkdir -p "${LTX_RUNS_ROOT:-$ROOT/runs}" "${LTX_DATA_ROOT:-$ROOT/data}" "$ROOT/wandb"
 
 echo
-printf 'Bootstrap complete. The runner reads this runpack\047s .env.local.\n  source %q\n  python -m ltx.cli preflight --config configs/native_cifar100_if100.yaml\n  bash scripts/run.sh\n' "$VENV/bin/activate"
+printf 'Bootstrap complete. The runner reads this runpack\047s .env.local.\n  source %q\n  python -m ltx preflight --config configs/native_cifar100_if100.yaml\n  bash scripts/run.sh\n' "$VENV/bin/activate"

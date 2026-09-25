@@ -27,9 +27,6 @@ from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 from ltx.paper_metrics import improved_prd_vgg16_k3, polynomial_mmd_kid, polynomial_mmd_kid_gpu
 
 
