@@ -1,62 +1,47 @@
-# Infrastructure smoke for the CCUA row only: a 20-step train, a coarse
-# ancestral-DDPM sampling pass, and the array export the shared evaluator
-# consumes. Not scientific evidence -- it exists to prove the new adapter,
-# patch, and dependency chain actually run on a real GPU before a 300k-step
-# campaign commits to them.
-campaign:
+# Infrastructure smoke only; these settings are not scientific evidence.
+experiment:
   name: smoke_ccua_v1
-  description: "20-step CCUA infrastructure test; not scientific evidence"
-  server_config: configs/server.yaml
-  paired_seeds: [0]
+  protocol: smoke
+  output_group: smoke_ccua
+  seeds: [0]
 
-repositories:
-  ccua:
-    url: https://github.com/C-Fun/Contrastive-Conditional-Unconditional-Alignment-for-Long-tailed-Diffusion-Model.git
-    commit: baff9def6cfd553d4452d10eab0bac66ec2727aa
-    directory: CCUA-DDPM
+methods:
+  - {name: ccua, objective: ccua, ccua_al: 1.0, ccua_ucl: 1.0}
 
-shared_backbone:
-  adapter: ccua
-  train:
-    lr: 0.0002
-    batch_size: 16
-    total_steps: 20
-    save_step: 10
-    sample_step: 1000
-    T: 1000
-    dropout: 0.1
-    warmup: 5000
-    num_workers: 2
-    ch: 128
-    ch_mult: [1, 2, 2, 2]
-    attn: [1]
-    num_res_blocks: 2
-    ema_decay: 0.9999
-  eval:
-    checkpoint_step: 20
-    num_images: 64
-    sample_batch_size: 32
-    guidance_scale: 1.0
-    uniform_labels: true
-    # method stays ancestral DDPM so the production branch is the one exercised;
-    # only the stride is coarsened so a smoke finishes in seconds.
-    sample_method: ddpm
-    ddim_skip_step: 100
-    paper_metrics: false
+repository:
+  directory: CCUA-DDPM
+  commit: baff9def6cfd553d4452d10eab0bac66ec2727aa
 
-stages:
-  - name: smoke_ccua
-    enabled: true
-    priority: 100
-    adapter: ccua
-    dataset:
-      name: cifar100lt_smoke
-      data_type: cifar100lt
-      imbalance_factor: 0.01
-      num_class: 100
-      img_size: 32
-      root: ${LTX_DATA_ROOT:-./data}
-    methods:
-      - {name: ccua, objective: ccua, ccua_al: 1.0, ccua_ucl: 1.0}
-    seeds: [0]
-    tags: [smoke]
+dataset:
+  name: cifar100lt_smoke
+  data_type: cifar100lt
+  root: "${LTX_DATA_ROOT:-./data}"
+  imbalance_factor: 0.01
+  num_class: 100
+  img_size: 32
+
+train:
+  total_steps: 20
+  batch_size: 16
+  lr: 0.0002
+  warmup: 5000
+  T: 1000
+  dropout: 0.1
+  num_workers: 2
+  save_step: 10
+  sample_step: 1000
+  ch: 128
+  ch_mult: [1, 2, 2, 2]
+  attn: [1]
+  num_res_blocks: 2
+  ema_decay: 0.9999
+
+evaluation:
+  checkpoint_step: 20
+  num_images: 64
+  sample_batch_size: 32
+  guidance_scale: 1.0
+  sample_method: ddpm
+  ddim_skip_step: 100
+  uniform_labels: true
+  paper_metrics: false

@@ -27,9 +27,7 @@ if [[ ! -f "$REPOS_ROOT/THIRD_PARTY_MANIFEST.json" ]]; then
   exit 2
 fi
 
-# CCUA-DDPM is the only active model/data/sampler backbone.  Metric assets are
-# also stored below this tree, so the active runner has no dependency on the
-# any retired standalone source directories.
+# CCUA-DDPM is the only model, dataset, sampler, and objective implementation.
 CCUA_ROOT="$REPOS_ROOT/CCUA-DDPM"
 if [[ ! -d "$CCUA_ROOT" || ! -f "$CCUA_ROOT/main.py" || ! -f "$CCUA_ROOT/model/model.py" ]]; then
   echo "[bootstrap] missing active CCUA-DDPM source at $CCUA_ROOT." >&2
@@ -42,13 +40,12 @@ fi
 mkdir -p "$CCUA_ROOT/stats"
 echo "[bootstrap] CCUA-DDPM-only backbone ready; legacy source trees are not required"
 
-# Authenticate once so every worker and the final report share one identity
-# instead of relying on ambient env vars. Never echo the key itself.
+# W&B is optional and used only by the final report.
 if [[ -n "${WANDB_API_KEY:-}" && "${WANDB_MODE:-online}" != "offline" ]]; then
   if wandb login --relogin "$WANDB_API_KEY" >/dev/null 2>&1; then
     echo "[bootstrap] W&B authenticated as ${WANDB_ENTITY:-default entity}"
   else
-    echo "[bootstrap] W&B login failed; online workers will stop instead of silently losing logs" >&2
+    echo "[bootstrap] W&B login failed; local experiments can still run" >&2
   fi
 fi
 
@@ -64,4 +61,4 @@ PY
 mkdir -p "${LTX_RUNS_ROOT:-$ROOT/runs}" "${LTX_DATA_ROOT:-$ROOT/data}" "$ROOT/wandb"
 
 echo
-printf 'Bootstrap complete. The runner reads this runpack\047s .env.local.\n  source %q\n  python main.py preflight --config configs/native_cifar100_if100.yaml\n  bash scripts/run.sh\n' "$VENV/bin/activate"
+printf 'Bootstrap complete.\n  source %q\n  python main.py plan\n  python main.py preflight\n  bash scripts/run.sh\n' "$VENV/bin/activate"

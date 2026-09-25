@@ -18,7 +18,7 @@ from pathlib import Path
 
 import numpy as np
 
-from runner.metrics import knn_radii, vgg16_fc2
+from metrics import knn_radii, vgg16_fc2
 
 
 DATASET = "cifar100"

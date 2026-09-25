@@ -6,14 +6,14 @@ import argparse
 import csv
 import json
 import math
+import os
 import statistics
 import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from runner.config import LoadedCampaign, load_campaign
-from runner.utils import load_runtime_env
+from experiment import Experiment, load_experiment
 
 
 METRICS = ("FID", "KID", "IS", "F_8", "F_1_8", "ImprovedPrecision", "Recall")
@@ -82,7 +82,7 @@ def _missing_metric_reason(metrics: dict[str, float]) -> str:
 
 def _write_per_seed(output: Path, rows: list[dict[str, Any]]) -> None:
     columns = [
-        "dataset", "method", "adapter", "seed", "status", "per_class_status",
+        "dataset", "method", "seed", "status", "per_class_status",
         "failure_reason", *METRICS, "run_dir",
     ]
     with (output / "per_seed.csv").open("w", newline="", encoding="utf-8") as handle:
@@ -109,7 +109,6 @@ def _aggregate(rows: list[dict[str, Any]], expected_seeds: list[int]) -> list[di
         result: dict[str, Any] = {
             "dataset": dataset,
             "method": method,
-            "adapter": sorted({row["adapter"] for row in group}),
             "complete": complete,
             "completed": len(complete_rows),
             "expected": len(expected_seeds),
@@ -149,13 +148,13 @@ def _aggregate_per_class(rows: list[dict[str, Any]], expected_seeds: list[int]) 
     return aggregate
 
 
-def _summary_payload(campaign: LoadedCampaign, rows: list[dict[str, Any]], aggregate: list[dict[str, Any]],
+def _summary_payload(experiment: Experiment, rows: list[dict[str, Any]], aggregate: list[dict[str, Any]],
                      per_class_aggregate: list[dict[str, Any]]) -> dict[str, Any]:
     complete = all(row["complete"] for row in aggregate)
     return {
         "protocol": "native_cifar_v1",
         "claim_status": "NATIVE_CIFAR_V1_COMPLETE" if complete else "NATIVE_CIFAR_V1_INCOMPLETE",
-        "campaign": campaign.raw.get("campaign", {}),
+        "experiment": experiment.raw.get("experiment", {}),
         "per_seed": rows,
         "aggregate": aggregate,
         "per_class_aggregate": per_class_aggregate,
@@ -196,20 +195,19 @@ def _write_results_log(output: Path, payload: dict[str, Any]) -> None:
     (output / "results.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _maybe_upload_wandb(campaign: LoadedCampaign, output: Path, rows: list[dict[str, Any]],
+def _maybe_upload_wandb(experiment: Experiment, output: Path, rows: list[dict[str, Any]],
                         aggregate: list[dict[str, Any]]) -> None:
     """Best-effort W&B upload. Local reporting and its exit status never depend on it."""
     try:
         import wandb
 
-        runtime = campaign.server.get("runtime", {})
         run = wandb.init(
-            project=runtime.get("wandb_project", "longtail"),
-            entity=runtime.get("wandb_entity") or None,
-            name=f"{campaign.raw['campaign']['name']}-native-report",
+            project=os.environ.get("WANDB_PROJECT", "longtail"),
+            entity=os.environ.get("WANDB_ENTITY") or None,
+            name=f"{experiment.name}-native-report",
             job_type="native-cifar-report",
-            mode=runtime.get("wandb_mode", "online"),
-            config={"campaign": campaign.raw.get("campaign", {})},
+            mode=os.environ.get("WANDB_MODE", "online"),
+            config={"experiment": experiment.raw.get("experiment", {})},
         )
         run.log({"comparison/per_seed": wandb.Table(
             columns=[key for key in rows[0] if key != "per_class"],
@@ -219,7 +217,7 @@ def _maybe_upload_wandb(campaign: LoadedCampaign, output: Path, rows: list[dict[
             columns=[key for key in aggregate[0] if key != "seed_values"],
             data=[[value for key, value in row.items() if key != "seed_values"] for row in aggregate],
         )})
-        artifact = wandb.Artifact(f"{campaign.raw['campaign']['name']}-native-report", type="evaluation-report")
+        artifact = wandb.Artifact(f"{experiment.name}-native-report", type="evaluation-report")
         for filename in ("per_seed.csv", "summary.json", "results.log"):
             artifact.add_file(str(output / filename))
         run.log_artifact(artifact)
@@ -236,23 +234,22 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _expected_seeds(campaign: LoadedCampaign) -> list[int]:
-    if campaign.raw.get("campaign", {}).get("protocol") != "native_cifar_v1":
+def _expected_seeds(experiment: Experiment) -> list[int]:
+    config = experiment.raw.get("experiment", {})
+    if experiment.protocol != "native_cifar_v1":
         raise ValueError("report_native_cifar.py only accepts protocol=native_cifar_v1")
-    expected_seeds = sorted(
-        set(map(int, campaign.raw.get("campaign", {}).get("paired_seeds", [])))
-    )
+    expected_seeds = sorted(set(map(int, config.get("seeds", []))))
     if not expected_seeds:
-        raise ValueError("native_cifar_v1 report requires at least one campaign.paired_seeds entry")
-    if not campaign.tasks:
-        raise ValueError("native_cifar_v1 report requires at least one task")
+        raise ValueError("native_cifar_v1 report requires experiment.seeds")
+    if not experiment.runs:
+        raise ValueError("native_cifar_v1 report requires at least one run")
     return expected_seeds
 
 
-def _collect_rows(campaign: LoadedCampaign) -> list[dict[str, Any]]:
+def _collect_rows(experiment: Experiment) -> list[dict[str, Any]]:
     rows = []
-    for task in campaign.tasks:
-        run_dir = Path(task.run_dir)
+    for run in experiment.runs:
+        run_dir = run.run_dir
         metrics = read_metrics(run_dir)
         per_class_status, per_class = read_per_class_metrics(run_dir)
 
@@ -265,10 +262,9 @@ def _collect_rows(campaign: LoadedCampaign) -> list[dict[str, Any]]:
         if missing_groups:
             reasons.append(f"missing groups: {', '.join(missing_groups)}")
         rows.append({
-            "dataset": task.dataset["name"],
-            "method": task.method,
-            "adapter": task.adapter,
-            "seed": int(task.seed),
+            "dataset": run.dataset["name"],
+            "method": run.method,
+            "seed": int(run.seed),
             "status": "complete" if not reasons else "MISSING",
             "per_class_status": per_class_status,
             "failure_reason": "; ".join(reasons),
@@ -280,7 +276,7 @@ def _collect_rows(campaign: LoadedCampaign) -> list[dict[str, Any]]:
 
 
 def _write_report(
-    campaign: LoadedCampaign,
+    experiment: Experiment,
     output: Path,
     rows: list[dict[str, Any]],
     expected_seeds: list[int],
@@ -290,7 +286,7 @@ def _write_report(
     _write_per_seed(output, rows)
     aggregate = _aggregate(rows, expected_seeds)
     per_class_aggregate = _aggregate_per_class(rows, expected_seeds)
-    payload = _summary_payload(campaign, rows, aggregate, per_class_aggregate)
+    payload = _summary_payload(experiment, rows, aggregate, per_class_aggregate)
     (output / "summary.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     _write_results_log(output, payload)
     return aggregate
@@ -298,19 +294,15 @@ def _write_report(
 
 def main() -> int:
     args = _parse_args()
-    campaign = load_campaign(args.config)
-    expected_seeds = _expected_seeds(campaign)
-
-    load_runtime_env(campaign.root)
+    experiment = load_experiment(args.config)
+    expected_seeds = _expected_seeds(experiment)
     output = Path(args.output) if args.output else (
-        Path(campaign.server["runtime"]["runs_root"])
-        / campaign.raw["campaign"]["name"]
-        / "report"
+        experiment.output_dir / "report"
     )
-    rows = _collect_rows(campaign)
-    aggregate = _write_report(campaign, output, rows, expected_seeds)
+    rows = _collect_rows(experiment)
+    aggregate = _write_report(experiment, output, rows, expected_seeds)
     if args.wandb:
-        _maybe_upload_wandb(campaign, output, rows, aggregate)
+        _maybe_upload_wandb(experiment, output, rows, aggregate)
 
     complete_cells = sum(row["complete"] for row in aggregate)
     print(f"[report] wrote {output / 'results.log'}; complete cells={complete_cells}/{len(aggregate)}")

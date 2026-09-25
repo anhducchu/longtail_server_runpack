@@ -6,7 +6,7 @@ Two operational changes, both opt-in and both confined to ``main.py --sample``:
 * ``--sample_output`` redirects the generated arrays to an absolute path.  The
   upstream filename is derived from a nine-field mangling of ``sample_name``
   (category, N, step, omega, scheduler, gamma, seed, DDIM steps), so predicting
-  it in the adapter would couple the runner to float formatting of two flags.
+  it in the launcher would couple our code to float formatting of two flags.
   It *redirects* rather than adds a second write: a 50k CIFAR array is ~600 MB,
   so duplicate copies would waste several GB across a campaign.
 

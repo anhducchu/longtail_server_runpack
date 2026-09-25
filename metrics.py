@@ -1,4 +1,4 @@
-"""Metric collection and shared paper-facing generation metrics.
+"""Shared paper-facing generation metrics.
 
 This module implements the paper evaluator shared by all four objectives. It
 uses chunked exact squared distances, avoiding a
@@ -9,82 +9,11 @@ accepts an explicit generator so a KID value is reproducible across jobs.
 """
 from __future__ import annotations
 
-import json
 import math
 import os
 import warnings
-from pathlib import Path
-from typing import Dict, Iterable
 
 import numpy as np
-
-
-def _put(out: Dict[str, float], key: str, value: object) -> None:
-    try:
-        scalar = float(value)
-    except (TypeError, ValueError):
-        return
-    if math.isfinite(scalar):
-        out[key] = scalar
-
-
-def _flatten(prefix: str, value: object, out: Dict[str, float]) -> None:
-    if isinstance(value, dict):
-        if "mean" in value and isinstance(value["mean"], (int, float)):
-            _put(out, prefix, value["mean"])
-            return
-        for key, child in value.items():
-            _flatten(f"{prefix}/{key}" if prefix else str(key), child, out)
-    elif isinstance(value, (int, float)):
-        _put(out, prefix, value)
-
-
-_BOOKKEEPING = (
-    "num_generated", "num_reference", "generated", "reference",
-    "seed", "samples", "label_histogram",
-)
-
-
-def collect_metrics(run_dir: Path) -> Dict[str, float]:
-    """Collect only JSON artifacts emitted by the shared evaluator."""
-    out: Dict[str, float] = {}
-    for path in run_dir.rglob("metrics*.json"):
-        if path.name == "metrics.collected.json":
-            continue
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not isinstance(payload, dict):
-            continue
-        if isinstance(payload.get("metrics"), dict):
-            _flatten("generation", payload["metrics"], out)
-        elif isinstance(payload.get("groups"), dict):
-            _flatten("generation/tail", payload["groups"], out)
-    return {
-        key: value for key, value in out.items()
-        if key.rsplit("/", 1)[-1] not in _BOOKKEEPING
-    }
-
-
-def latest_tensorboard_scalars(logdir: Path):
-    try:
-        from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
-    except Exception:
-        return {}
-    if not list(logdir.rglob("events.out.tfevents.*")):
-        return {}
-    try:
-        accumulator = EventAccumulator(str(logdir), size_guidance={"scalars": 1})
-        accumulator.Reload()
-        out = {}
-        for tag in accumulator.Tags().get("scalars", []):
-            events = accumulator.Scalars(tag)
-            if events:
-                out[tag] = (int(events[-1].step), float(events[-1].value))
-        return out
-    except Exception:
-        return {}
 
 
 def polynomial_mmd_kid(

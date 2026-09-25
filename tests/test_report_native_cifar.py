@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from runner.config import load_campaign
+from experiment import load_experiment
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,28 +24,23 @@ def load_report_module():
     return module
 
 
-def write_campaign(tmp_path: Path):
+def write_experiment(tmp_path: Path, monkeypatch):
     runs_root = tmp_path / "runs"
-    server = tmp_path / "server.yaml"
-    server.write_text(json.dumps({"runtime": {"runs_root": str(runs_root)}}), encoding="utf-8")
+    monkeypatch.setenv("LTX_RUNS_ROOT", str(runs_root))
     config = tmp_path / "native.yaml"
     config.write_text(json.dumps({
-        "campaign": {
+        "experiment": {
             "name": "native-cifar-test",
             "protocol": "native_cifar_v1",
-            "server_config": str(server),
-            "paired_seeds": [0, 1, 2],
-        },
-        "stages": [{
-            "name": "c100_if100",
-            "adapter": "ccua",
-            "dataset": {"name": "cifar100lt_if100"},
-            "eval": {},
-            "methods": [{"name": "ddpm"}],
             "seeds": [0, 1, 2],
-        }],
+        },
+        "repository": {"directory": "CCUA-DDPM"},
+        "dataset": {"name": "cifar100lt_if100", "root": str(tmp_path / "data")},
+        "train": {},
+        "evaluation": {},
+        "methods": [{"name": "ddpm", "objective": "ddpm"}],
     }), encoding="utf-8")
-    return config, load_campaign(config)
+    return config, load_experiment(config)
 
 
 def native_metrics(seed: int) -> dict[str, float]:
@@ -73,10 +68,10 @@ def write_run(task, payload: dict, *, per_class: dict | None = None, success: bo
 
 
 def test_native_report_aggregates_canonical_metrics_across_three_seeds(tmp_path, monkeypatch):
-    config, campaign = write_campaign(tmp_path)
-    for task in campaign.tasks:
-        metrics = native_metrics(task.seed)
-        write_run(task, {"metrics": metrics}, per_class={"groups": {
+    config, experiment = write_experiment(tmp_path, monkeypatch)
+    for run in experiment.runs:
+        metrics = native_metrics(run.seed)
+        write_run(run, {"metrics": metrics}, per_class={"groups": {
             group: {"FID": metrics["FID"] + offset}
             for group, offset in (("Many", 0.1), ("Medium", 0.2), ("Few", 0.3))
         }})
@@ -105,12 +100,12 @@ def test_native_report_aggregates_canonical_metrics_across_three_seeds(tmp_path,
 
 
 def test_native_report_fails_closed_for_missing_success_or_required_metric(tmp_path, monkeypatch):
-    config, campaign = write_campaign(tmp_path)
-    for task in campaign.tasks:
-        metrics = native_metrics(task.seed)
-        if task.seed == 1:
+    config, experiment = write_experiment(tmp_path, monkeypatch)
+    for run in experiment.runs:
+        metrics = native_metrics(run.seed)
+        if run.seed == 1:
             metrics.pop("Recall")
-        write_run(task, {"metrics": metrics}, success=task.seed != 2)
+        write_run(run, {"metrics": metrics}, success=run.seed != 2)
 
     output = tmp_path / "report"
     module = load_report_module()
@@ -127,12 +122,12 @@ def test_native_report_fails_closed_for_missing_success_or_required_metric(tmp_p
 
 
 def test_native_report_requires_complete_many_medium_few(tmp_path, monkeypatch):
-    config, campaign = write_campaign(tmp_path)
-    for task in campaign.tasks:
+    config, experiment = write_experiment(tmp_path, monkeypatch)
+    for run in experiment.runs:
         groups = {"Many": {"FID": 10.0}, "Medium": {"FID": 11.0}, "Few": {"FID": 12.0}}
-        if task.seed == 1:
+        if run.seed == 1:
             groups.pop("Few")
-        write_run(task, {"metrics": native_metrics(task.seed)}, per_class={"groups": groups})
+        write_run(run, {"metrics": native_metrics(run.seed)}, per_class={"groups": groups})
 
     output = tmp_path / "report"
     module = load_report_module()
@@ -147,13 +142,12 @@ def test_native_report_requires_complete_many_medium_few(tmp_path, monkeypatch):
 
 
 def test_native_report_accepts_the_seed_zero_baseline_config(tmp_path, monkeypatch):
-    config, campaign = write_campaign(tmp_path)
+    config, experiment = write_experiment(tmp_path, monkeypatch)
     payload = json.loads(config.read_text(encoding="utf-8"))
-    payload["campaign"]["paired_seeds"] = [0]
-    payload["stages"][0]["seeds"] = [0]
+    payload["experiment"]["seeds"] = [0]
     config.write_text(json.dumps(payload), encoding="utf-8")
-    campaign = load_campaign(config)
-    write_run(campaign.tasks[0], {"metrics": native_metrics(0)}, per_class={"groups": {
+    experiment = load_experiment(config)
+    write_run(experiment.runs[0], {"metrics": native_metrics(0)}, per_class={"groups": {
         "Many": {"FID": 10.0}, "Medium": {"FID": 11.0}, "Few": {"FID": 12.0},
     }})
 

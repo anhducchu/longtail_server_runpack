@@ -6,7 +6,6 @@ scikit-learn==1.5.2
 tensorboardX==2.6.2.2
 tqdm==4.67.1
 PyYAML==6.0.2
-psutil==6.1.1
 wandb==0.19.6
 pytest==8.3.4
 # Hard, unconditionally-imported dependencies of the active CCUA host.

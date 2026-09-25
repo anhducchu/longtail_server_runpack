@@ -1,33 +1,29 @@
-# Seed-0 comparison for the shared CCUA-DDPM baseline table.
-campaign:
+# Seed-0 comparison that includes the T2H objective.
+experiment:
   name: ccua_cifar100_if100_seed0_v1
   protocol: native_cifar_v1
-  description: "CIFAR-100-LT IF100: CCUA-backed DDPM, CBDM, and T2H, seed 0"
-  server_config: configs/server.yaml
-  paired_seeds: [0]
-  default_priority: 100
-
-native_contract:
-  dataset: cifar100lt_if100
-  methods: [ddpm, cbdm, t2h]
+  output_group: c100_if100_baselines
   seeds: [0]
-  train_updates: 300000
-  train_batch_size: 64
-  learning_rate: 0.0002
-  diffusion_steps: 1000
-  generated_images: 50000
-  guidance_scale: 1.5
-  sampler_family: ddim_100
-  adapter: ccua
-  repository: ccua
 
-repositories:
-  ccua:
-    url: https://github.com/C-Fun/Contrastive-Conditional-Unconditional-Alignment-for-Long-tailed-Diffusion-Model.git
-    commit: baff9def6cfd553d4452d10eab0bac66ec2727aa
-    directory: CCUA-DDPM
+methods:
+  - {name: ddpm, objective: ddpm}
+  - {name: cbdm, objective: cbdm, cb_tau: 1.0}
+  - {name: t2h, objective: t2h}
 
-native_train: &native_train
+repository:
+  directory: CCUA-DDPM
+  commit: baff9def6cfd553d4452d10eab0bac66ec2727aa
+
+dataset:
+  name: cifar100lt_if100
+  data_type: cifar100lt
+  root: "${LTX_DATA_ROOT:-./data}"
+  imbalance_factor: 0.01
+  split_seed: 0
+  num_class: 100
+  img_size: 32
+
+train:
   total_steps: 300000
   batch_size: 64
   lr: 0.0002
@@ -39,7 +35,7 @@ native_train: &native_train
   dropout: 0.1
   grad_clip: 1.0
   num_workers: 4
-  save_step: 50000
+  save_step: 25000
   sample_step: 100000
   ch: 128
   ch_mult: [1, 2, 2, 2]
@@ -47,34 +43,13 @@ native_train: &native_train
   num_res_blocks: 2
   ema_decay: 0.9999
 
-native_eval: &native_eval
+evaluation:
   checkpoint_step: 300000
   num_images: 50000
   sample_batch_size: 64
+  inception_batch_size: 64
   guidance_scale: 1.5
   sample_method: ddim
   ddim_skip_step: 10
   uniform_labels: true
-  sampler_family: ddim_100
-  metric_protocol: native_cifar_v1
   paper_metrics: true
-
-stages:
-  - name: c100_if100_baselines
-    adapter: ccua
-    dataset:
-      name: cifar100lt_if100
-      data_type: cifar100lt
-      imbalance_factor: 0.01
-      split_seed: 0
-      num_class: 100
-      img_size: 32
-      root: "${LTX_DATA_ROOT:-./data}"
-    train: *native_train
-    eval: *native_eval
-    methods:
-      - {name: ddpm, objective: ddpm}
-      - {name: cbdm, objective: cbdm, cb_tau: 1.0}
-      - {name: t2h, objective: t2h}
-    seeds: [0]
-    tags: [ccua-backbone, native-cifar-v1, cifar100lt, if100, baseline, seed0]

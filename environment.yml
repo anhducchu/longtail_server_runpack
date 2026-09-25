@@ -28,11 +28,9 @@ dependencies:
   - pillow=10.4.0
   - pyyaml=6.0.2
   - tqdm=4.67.1
-  - tensorboard=2.18.0
   - pip:
-      # Active CCUA entrypoint and runpack orchestration.
+      # Active CCUA entrypoint, evaluation, and optional report upload.
       - absl-py==2.1.0
       - tensorboardX==2.6.2.2
       - wandb==0.19.6
-      - psutil==6.1.1
       - pytest==8.3.4

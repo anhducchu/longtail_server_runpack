@@ -1,167 +1,139 @@
-# Long-tail diffusion baseline runpack
+# Long-tail diffusion baselines
 
-This repository runs DDPM, CBDM, T2H, and CCUA through one pinned
-`third_party/CCUA-DDPM/` host. The four objectives share the CIFAR-100-LT
-split, U-Net, optimizer, checkpoint format, sampler, and evaluator. Any other
-objective or runtime host is rejected before launch.
+This repository runs DDPM, CBDM, T2H, and CCUA on one pinned CCUA-DDPM
+implementation. All objectives share the CIFAR-100-LT dataset, U-Net,
+optimizer, sampler, checkpoint format, and evaluator.
 
-Archived research code is preserved on the local branch
-`archive/research-wip-20260922`; it is not part of the `main` runtime.
+Archived research code remains on the local branch
+`archive/research-wip-20260922`.
 
-## Start here
+## Read the code
 
-- To understand the repo, open `main.py` and start at its `main()` function.
-- To run the full server workflow, use `scripts/run.sh`.
-- Scientific parameters live in `configs/native_cifar100_if100.yaml`; machine
-  and retry parameters live in `configs/server.yaml`.
+Start at `main.py`. The complete runtime flow is:
 
 ```text
-main.py:main()
-  -> main.py:run_campaign()                    load config + preflight
-  -> runner/scheduler.py:Scheduler.run()       choose GPU and launch tasks
-  -> runner/worker.py:main()                   execute one task safely
-  -> runner/adapter.py:CCUAAdapter.phases()    train -> sample -> metrics
-  -> third_party/CCUA-DDPM/main.py:train()     data, U-Net, optimizer, loop
-  -> third_party/CCUA-DDPM/diffusion.py:
-       GaussianDiffusionTrainer.forward()      DDPM/CBDM/T2H/CCUA objective
+main.py:run_one()
+  -> experiment.py:train()
+       -> third_party/CCUA-DDPM/main.py:train()
+       -> third_party/CCUA-DDPM/diffusion.py:GaussianDiffusionTrainer.forward()
+  -> experiment.py:sample()
+       -> third_party/CCUA-DDPM/main.py:sample()
+  -> experiment.py:evaluate()
+       -> tools/evaluate_ccua.py
 ```
 
-There is no installable framework layer. `main.py` is the CLI; `runner/`
-contains only the infrastructure needed to execute and recover experiments.
+There is no internal scheduler, worker process, SQLite state database, or
+adapter class. `main.py` runs selected experiments sequentially. Shell or
+Slurm owns parallelism.
 
-The important handoff is in `CCUAAdapter._train_phase()`: it translates one
-resolved task into the arguments for the vendored trainer. In that trainer,
-`train()` constructs `GaussianDiffusionTrainer`; its `forward()` computes the
-four loss components, and the training loop combines the components enabled by
-the chosen objective. Sampling follows the same path through
-`CCUAAdapter._sample_phase()` to `third_party/CCUA-DDPM/main.py:sample()`.
+The objective switch reaches the same diffusion trainer:
 
-| Objective | Adapter enables | Training objective |
-| --- | --- | --- |
-| DDPM | no additional flag | DDPM noise-prediction loss |
-| CBDM | `cbdm`, `cb_tau` | DDPM + CBDM balancing loss |
-| T2H | `transfer_x0` | DDPM loss with the transferred target |
-| CCUA | `ccua_al`, `ccua_ucl` | DDPM + alignment + unconditional contrastive loss |
-
-### Where parameters come from
-
-| Parameter type | Source | Examples |
-| --- | --- | --- |
-| Scientific contract | `configs/native_cifar100_if100.yaml` | objective, seeds, batch size, learning rate, diffusion steps, sampling |
-| Machine policy | `configs/server.yaml` | GPUs, concurrency, storage roots, retry, checkpoint interval |
-| One-launch override | `python main.py run --help` | selected GPUs, job limit, explicit resume checkpoint |
-| Local environment | `.env.local` | paths, W&B credentials and mode |
-
-`runner/config.py:load_campaign()` merges those files into concrete `Task`
-objects. From that point onward, scheduler, worker, and adapter receive resolved
-values; they do not invent another scientific configuration layer.
+| Method | Training objective |
+| --- | --- |
+| DDPM | DDPM noise-prediction loss |
+| CBDM | DDPM + CBDM balancing loss |
+| T2H | DDPM with the transferred target |
+| CCUA | DDPM + alignment + unconditional contrastive loss |
 
 ## Repository map
 
 | Path | Purpose |
 | --- | --- |
-| `main.py` | Single CLI entrypoint: plan, preflight, run, status, retry, stop |
-| `configs/` | Main 9-task campaign, seed-0 T2H comparison, smoke, and server policy |
-| `runner/` | Config, preflight, scheduling, worker, state, adapter, and metrics |
-| `third_party/CCUA-DDPM/` | Baseline-only CIFAR-100 trainer, sampler, and metric host |
-| `tools/` | Metric-asset preparation, shared evaluation, and final report |
-| `scripts/` | One local runner, bootstrap, and Slurm entrypoint |
-| `tests/` | Baseline unit and regression suite |
+| `main.py` | Public flow: select runs, then train → sample → evaluate |
+| `experiment.py` | Flat config loader, checkpoint resume, and direct vendor commands |
+| `metrics.py` | Shared paper metric implementations |
+| `configs/` | Scientific parameters only |
+| `third_party/CCUA-DDPM/` | Pinned model, objective, trainer, and sampler |
+| `tools/` | Metric asset preparation, evaluation, and report generation |
+| `scripts/` | Environment bootstrap, local launch, and Slurm array launch |
+| `tests/` | Scientific-contract and metric regression tests |
 
-Data, checkpoints, generated arrays, logs, reports, W&B state, and metric
-arrays remain local and are ignored by Git. Only metric manifests are tracked.
+Generated data, checkpoints, arrays, logs, reports, and W&B files remain local
+and are ignored by Git.
 
-## Locked protocol
-
-- CIFAR-100-LT IF100, 32×32, split seed 0;
-- 300,000 updates, batch 64, learning rate `2e-4`, T=1000, EMA `0.9999`;
-- 50,000 class-uniform samples;
-- DDIM-100, guidance scale 1.5;
-- shared FID, KID, IS, F8/F1/8, improved precision/recall, and
-  Many/Medium/Few FID.
-
-The main config is DDPM/CBDM/CCUA × seeds 0, 1, and 2 (9 tasks). The separate
-seed-0 config runs DDPM/CBDM/T2H on the same host.
-
-## Configure and run
-
-`.env.example` is the only tracked environment contract:
+## Configure
 
 ```bash
 cp .env.example .env.local
-# Fill WANDB_API_KEY, storage roots, and optional GPU-packing overrides.
+# Fill local paths and optional W&B report settings.
 ```
 
-Plan and preflight without launching:
+The YAML files contain the scientific configuration. Local paths come from
+`.env.local`; temporary run selection comes from CLI flags.
+
+```bash
+python main.py plan --config configs/native_cifar100_if100.yaml
+python main.py preflight --config configs/native_cifar100_if100.yaml
+python main.py run --help
+```
+
+The main config contains DDPM/CBDM/CCUA × seeds 0, 1, and 2. The seed-0 config
+contains DDPM/CBDM/T2H.
+
+## Run
+
+Run the complete nine-run campaign sequentially:
+
+```bash
+bash scripts/run.sh
+```
+
+Run one experiment on one GPU:
+
+```bash
+bash scripts/run.sh \
+  configs/native_cifar100_if100.yaml \
+  --method ddpm --seed 0 --gpu 0
+```
+
+Run only one lifecycle stage:
+
+```bash
+python main.py run --method ddpm --seed 0 --stage train
+python main.py run --method ddpm --seed 0 --stage sample
+python main.py run --method ddpm --seed 0 --stage evaluate
+```
+
+Rerunning the same command skips completed outputs. Training resumes the newest
+complete `ckpt_<step>.pt`; checkpoint replacement is atomic. An external
+full-state checkpoint can be selected explicitly:
+
+```bash
+python main.py run --method ddpm --seed 0 \
+  --resume-checkpoint /absolute/path/ckpt_250000.pt
+```
+
+## Multi-GPU and Slurm
+
+`python main.py plan` prints a stable index for each method/seed. Launch one
+process per GPU or use a Slurm array. Prepare the environment and shared metric
+assets once before submitting the array; array jobs never mutate the shared
+environment:
 
 ```bash
 bash scripts/bootstrap.sh
 source .venv/bin/activate
-python main.py plan --config configs/native_cifar100_if100.yaml
-python main.py preflight --config configs/native_cifar100_if100.yaml
+python -m tools.prepare_cifar_metric_assets \
+  --repo third_party/CCUA-DDPM --data-root "${LTX_DATA_ROOT:-./data}" \
+  --output "${LTX_METRICS_ROOT:-third_party/CCUA-DDPM/stats}"
+sbatch --array=0-8 scripts/submit_slurm.sh
 ```
 
-Run the main campaign or the seed-0 T2H comparison:
+For the three-run seed-0 config:
 
 ```bash
-bash scripts/run.sh
-bash scripts/run.sh configs/native_cifar100_if100_seed0.yaml
+sbatch --array=0-2 scripts/submit_slurm.sh \
+  configs/native_cifar100_if100_seed0.yaml
 ```
 
-`scripts/run.sh` selects or creates the CUDA environment, bootstraps the local
-venv, prepares missing CIFAR metric assets, launches the scheduler, and writes
-the report. CLI flags after the optional config path pass through to
-`main.py run`:
+Each array element runs exactly one index and therefore owns one GPU.
+
+## Report and verify
 
 ```bash
-bash scripts/run.sh --gpus 0,1,2,3 --per-gpu auto --jobs auto
-```
+python -m tools.report_native_cifar \
+  --config configs/native_cifar100_if100.yaml --wandb
 
-For Slurm:
-
-```bash
-sbatch scripts/submit_slurm.sh
-sbatch scripts/submit_slurm.sh configs/native_cifar100_if100_seed0.yaml
-```
-
-## Operate and recover
-
-The CLI replaces per-command shell wrappers:
-
-```bash
-python main.py status --config configs/native_cifar100_if100.yaml
-python main.py status --watch 20 --config configs/native_cifar100_if100.yaml
-python main.py retry-failed --config configs/native_cifar100_if100.yaml
-python main.py stop --config configs/native_cifar100_if100.yaml
-```
-
-Rerunning the same campaign resumes from the newest complete local checkpoint.
-To resume one row from an explicitly named full-state checkpoint:
-
-```bash
-python main.py run \
-  --config configs/native_cifar100_if100.yaml \
-  --resume-method ddpm --resume-seed 0 \
-  --resume-checkpoint /absolute/path/ckpt_250000.pt
-```
-
-Checkpoints are atomically replaced and the server retry policy caps their
-interval, so SIGKILL recovery loses a bounded amount of work. Generated
-Inception features are cached only while the sample path, size, and mtime still
-match.
-
-## Smoke and verification
-
-The smoke config is infrastructure-only and deliberately bypasses the locked
-paper preflight:
-
-```bash
-bash scripts/run.sh configs/smoke_ccua.yaml --skip-preflight
-```
-
-Before handing off a change:
-
-```bash
 python -m pytest -q
 bash -n scripts/*.sh
 git diff --check

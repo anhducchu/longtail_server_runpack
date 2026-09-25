@@ -17,7 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
-from runner.metrics import improved_prd_vgg16_k3, polynomial_mmd_kid, polynomial_mmd_kid_gpu
+from metrics import improved_prd_vgg16_k3, polynomial_mmd_kid, polynomial_mmd_kid_gpu
 
 
 _IS_SPLITS = 10
@@ -195,7 +195,7 @@ def _cached_inception_features_and_is(args, images: np.ndarray) -> tuple[np.ndar
     """Extract Inception features once per sample artifact and reuse them.
 
     The cache is opt-in at the evaluator API level and enabled by the shared
-    CCUA adapter for subsequent campaigns.  A missing or stale cache simply
+    direct experiment flow for subsequent evaluations. A missing or stale cache simply
     falls back to the normal CUDA extraction path and is written atomically.
     """
     cache_value = getattr(args, "generated_features_cache", None)
