@@ -10,7 +10,6 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from typing import Dict, Optional
 
 import psutil
 
@@ -33,7 +32,7 @@ class Monitor(threading.Thread):
         self.interval = interval
         self.stop_event = threading.Event()
         self.last_images = set()
-        self.last_tb_step: Dict[str, int] = {}
+        self.last_tb_step: dict[str, int] = {}
         self.peak_memory_gb = 0.0
 
     def stop(self):
@@ -101,7 +100,7 @@ _METRIC_GOALS = {
 }
 
 
-def wandb_config(task: Task) -> Dict[str, object]:
+def wandb_config(task: Task) -> dict[str, object]:
     """The knobs that actually identify and constrain this run.
 
     ``task.to_dict()`` is a large dump that buries the protocol under
@@ -110,7 +109,7 @@ def wandb_config(task: Task) -> Dict[str, object]:
     the identity and the fairness contract.
     """
     train, evaluate = task.train, task.eval
-    config: Dict[str, object] = {
+    config: dict[str, object] = {
         "campaign": task.campaign,
         "dataset": task.dataset.get("name"),
         "method": task.method,
@@ -242,7 +241,13 @@ def init_wandb(task: Task, run_dir: Path):
 _OUTPUT_SEGMENT = re.compile(rb"[^\r\n]*[\r\n]")
 
 
-def run_phase(phase, env: Dict[str, str], log_path: Path, state: StateDB, task_id: str, wb_run,
+class PhaseFailed(RuntimeError):
+    def __init__(self, phase: str, exit_code: int):
+        super().__init__(f"phase {phase} exited with {exit_code}")
+        self.exit_code = exit_code
+
+
+def run_phase(phase, env: dict[str, str], log_path: Path, state: StateDB, task_id: str, wb_run,
               progress_seconds: float = 30.0) -> int:
     outputs_exist = phase.skip_if_exists and all(path.exists() for path in phase.skip_if_exists)
     if outputs_exist:
@@ -353,7 +358,7 @@ def write_provenance(task: Task, run_dir: Path, root: Path) -> None:
     atomic_write_json(run_dir / "provenance.json", payload)
 
 
-def resolve_batch_size(task: Task, attempt: int) -> Optional[int]:
+def resolve_batch_size(task: Task, attempt: int) -> int | None:
     """Pick the batch size for this attempt, honoring the fairness contract.
 
     A retried task may fall back to a smaller batch after an OOM, but never to
@@ -363,7 +368,7 @@ def resolve_batch_size(task: Task, attempt: int) -> Optional[int]:
     (or larger) batch on retry would publish an off-contract row instead.
     """
     contract_batch = int(task.train.get("batch_size", 128))
-    if task.eval.get("metric_protocol") in {"unified_cifar_v1", "native_cifar_v1"}:
+    if task.eval.get("metric_protocol") == "native_cifar_v1":
         return None
     oom_sizes = task.retry.get("oom_batch_sizes", [])
     if attempt <= 1 or not oom_sizes:
@@ -372,18 +377,17 @@ def resolve_batch_size(task: Task, attempt: int) -> Optional[int]:
     return min(int(oom_sizes[idx]), contract_batch)
 
 
-def main() -> None:
+def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--state", required=True)
     parser.add_argument("--task", required=True)
     parser.add_argument("--gpu", type=int, required=True)
     parser.add_argument("--root", required=True)
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    state = StateDB(Path(args.state))
-    row = state.get(args.task)
-    task = Task(**row["task"])
-    state.mark_started(task.id, os.getpid())
+
+def _prepare_run(task: Task, row: dict, gpu_id: int, root: Path) -> tuple[Path, int | None, int]:
+    """Create the run directory, provenance, and process environment."""
     run_dir = Path(task.run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -400,20 +404,177 @@ def main() -> None:
     resolved = task.to_dict()
     resolved["effective_batch_size"] = effective_batch
     atomic_write_json(run_dir / "task.resolved.json", resolved)
-    write_provenance(task, run_dir, Path(args.root))
-    (run_dir / "gpu.txt").write_text(str(args.gpu), encoding="utf-8")
+    write_provenance(task, run_dir, root)
+    (run_dir / "gpu.txt").write_text(str(gpu_id), encoding="utf-8")
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     os.environ.setdefault("PYTHONUNBUFFERED", "1")
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     os.environ.setdefault("WANDB_PROJECT", task.runtime.get("wandb_project", "longtail"))
     os.environ.setdefault("WANDB_DIR", str(run_dir / "wandb"))
+    return run_dir, batch_size, effective_batch
+
+
+def _phase_environment(task: Task, gpu_id: int, run_dir: Path) -> dict[str, str]:
+    """Environment passed to the vendored trainer and evaluator."""
+    return {
+        "CUDA_VISIBLE_DEVICES": str(gpu_id),
+        "LTX_TASK_ID": task.id,
+        "LTX_RUN_DIR": str(run_dir),
+        # The worker owns W&B. The vendored trainer writes TensorBoard only.
+        "WANDB_MODE": "disabled",
+        "TQDM_MININTERVAL": str(task.runtime.get("tqdm_min_interval_seconds", 10)),
+    }
+
+
+def _run_task(
+    task: Task,
+    root: Path,
+    gpu_id: int,
+    batch_size: int | None,
+    run_dir: Path,
+    state: StateDB,
+    wb_run,
+) -> dict[str, float]:
+    if task.adapter != "ccua":
+        raise ValueError(f"unsupported adapter: {task.adapter}")
+
+    phases = CCUAAdapter(root).phases(task, batch_size=batch_size)
+    environment = _phase_environment(task, gpu_id, run_dir)
+    log_path = run_dir / "stdout.log"
+    progress_seconds = float(task.runtime.get("progress_log_every_seconds", 30))
+    for phase in phases:
+        exit_code = run_phase(
+            phase,
+            environment,
+            log_path,
+            state,
+            task.id,
+            wb_run,
+            progress_seconds,
+        )
+        if exit_code:
+            raise PhaseFailed(phase.name, exit_code)
+
+    metrics = collect_metrics(run_dir)
+    atomic_write_json(run_dir / "metrics.collected.json", metrics)
+    return metrics
+
+
+def _log_final_metrics(wb_run, metrics: dict[str, float]) -> None:
+    if wb_run is None or not metrics:
+        return
+    wb_run.log(metrics)
+    for key, value in metrics.items():
+        wb_run.summary[key] = value
+
+
+def _maybe_alert(task: Task, status: str, message: str = "") -> None:
+    setting = os.environ.get("LTX_WANDB_ALERTS", "critical").lower()
+    if status == "completed":
+        enabled = setting in {"true", "all"} or (
+            setting == "critical" and "critical" in task.tags
+        )
+    else:
+        enabled = setting not in {"false", "off", "0"}
+    if not enabled:
+        return
+    try:
+        import wandb
+
+        title = (
+            f"LongTail finished: {task.method}"
+            if status == "completed"
+            else f"LongTail {status}: {task.method}"
+        )
+        details = f"{task.stage}, seed {task.seed}"
+        if message:
+            details += f": {message}"
+        wandb.alert(title=title, text=details)
+    except Exception:
+        pass
+
+
+def _mark_success(task: Task, run_dir: Path, state: StateDB, wb_run, metrics: dict) -> None:
+    _log_final_metrics(wb_run, metrics)
+    (run_dir / "SUCCESS").write_text(
+        time.strftime("%Y-%m-%dT%H:%M:%S%z"), encoding="utf-8"
+    )
+    state.finish(task.id, 0, "completed", "completed")
+    if wb_run is not None:
+        wb_run.summary["status"] = "completed"
+        _maybe_alert(task, "completed")
+
+
+def _mark_failure(
+    task: Task,
+    run_dir: Path,
+    state: StateDB,
+    wb_run,
+    exit_code: int,
+    error: Exception,
+) -> str:
+    message = f"{type(error).__name__}: {error}"
+    log_path = run_dir / "stdout.log"
+    log_tail = (
+        log_path.read_text(encoding="utf-8", errors="replace")[-10_000:]
+        if log_path.exists()
+        else ""
+    )
+    is_oom = "out of memory" in (message + log_tail).lower()
+    status = state.retry_or_fail(
+        task.id,
+        exit_code,
+        message + (" [OOM]" if is_oom else ""),
+        max_attempts=int(task.retry.get("max_attempts", 2)),
+        retry_exit_codes=task.retry.get("retry_exit_codes"),
+        auto_resume_max_attempts=task.retry.get("auto_resume_max_attempts"),
+        auto_resume_exit_codes=task.retry.get("auto_resume_exit_codes"),
+    )
+    if wb_run is not None:
+        wb_run.summary["status"] = status
+        wb_run.summary["error"] = message
+        wb_run.summary["oom_detected"] = is_oom
+        _maybe_alert(task, status, message)
+    return status
+
+
+def _finish_wandb(task: Task, run_dir: Path, wb_run, exit_code: int) -> None:
+    if wb_run is None:
+        return
+    try:
+        log_path = run_dir / "stdout.log"
+        if task.runtime.get("upload_stdout_artifact", True) and log_path.exists():
+            import wandb
+
+            artifact = wandb.Artifact(f"logs-{task.id}", type="run-logs")
+            for path in (
+                log_path,
+                run_dir / "task.resolved.json",
+                run_dir / "provenance.json",
+                run_dir / "RESUME_SOURCE.json",
+                run_dir / "metrics.collected.json",
+            ):
+                if path.exists():
+                    artifact.add_file(str(path))
+            wb_run.log_artifact(artifact)
+        wb_run.finish(exit_code=exit_code)
+    except Exception:
+        pass
+
+
+def main() -> None:
+    args = _parse_args()
+    root = Path(args.root)
+    state = StateDB(Path(args.state))
+    row = state.get(args.task)
+    task = Task(**row["task"])
+    state.mark_started(task.id, os.getpid())
+    run_dir, batch_size, effective_batch = _prepare_run(task, row, args.gpu, root)
 
     wb_run = None
     monitor = None
-    stdout_log = run_dir / "stdout.log"
     exit_code = 1
-    message = ""
     try:
         wb_run = init_wandb(task, run_dir)
         define_wandb_metrics(wb_run)
@@ -422,95 +583,31 @@ def main() -> None:
             wb_run.summary["gpu_id"] = args.gpu
             wb_run.summary["effective_batch_size"] = effective_batch
 
-        monitor = Monitor(task.id, run_dir, args.gpu, state, wb_run, interval=int(task.runtime.get("log_system_every_seconds", 30)))
-        monitor.start()
-        if task.adapter != "ccua":
-            raise ValueError(f"unsupported adapter: {task.adapter}")
-        adapter = CCUAAdapter(Path(args.root))
-        phases = adapter.phases(task, batch_size=batch_size)
-        # Vendored trainers may call wandb.init with hardcoded settings during
-        # --train, disconnected from this task's run (wrong
-        # project, no id, name collides across every task/seed). Disabling wandb
-        # inside the subprocess is a no-op for it; the real loss curve already
-        # reaches this task's W&B run via the Monitor's tensorboard mirror below.
-        env = {"CUDA_VISIBLE_DEVICES": str(args.gpu), "LTX_TASK_ID": task.id, "LTX_RUN_DIR": str(run_dir),
-               "WANDB_MODE": "disabled",
-               # Thin the redraws out at the source as well, so a 31-hour run
-               # does not push a million bar updates through the pipe just to
-               # have them dropped here.
-               "TQDM_MININTERVAL": str(task.runtime.get("tqdm_min_interval_seconds", 10))}
-        progress_seconds = float(task.runtime.get("progress_log_every_seconds", 30))
-        for phase in phases:
-            code = run_phase(phase, env, stdout_log, state, task.id, wb_run, progress_seconds)
-            if code != 0:
-                exit_code = code
-                raise RuntimeError(f"phase {phase.name} exited with {code}")
-        metrics = collect_metrics(run_dir)
-        atomic_write_json(run_dir / "metrics.collected.json", metrics)
-        if wb_run is not None and metrics:
-            wb_run.log(metrics)
-            for key, value in metrics.items():
-                wb_run.summary[key] = value
-        (run_dir / "SUCCESS").write_text(time.strftime("%Y-%m-%dT%H:%M:%S%z"), encoding="utf-8")
-        exit_code = 0
-        message = "completed"
-        state.finish(task.id, 0, "completed", message)
-        if wb_run is not None:
-            wb_run.summary["status"] = "completed"
-            if os.environ.get("LTX_WANDB_ALERTS", "critical").lower() in {"true", "all"} or (os.environ.get("LTX_WANDB_ALERTS", "critical").lower() == "critical" and "critical" in task.tags):
-                try:
-                    import wandb
-                    wandb.alert(title=f"LongTail finished: {task.method}", text=f"{task.stage}, seed {task.seed}")
-                except Exception:
-                    pass
-    except Exception as exc:
-        message = f"{type(exc).__name__}: {exc}"
-        traceback.print_exc()
-        tail = ""
-        if stdout_log.exists():
-            tail = stdout_log.read_text(encoding="utf-8", errors="replace")[-10000:]
-        is_oom = "out of memory" in (message + tail).lower()
-        max_attempts = int(task.retry.get("max_attempts", 2))
-        status = state.retry_or_fail(
+        monitor = Monitor(
             task.id,
-            exit_code,
-            message + (" [OOM]" if is_oom else ""),
-            max_attempts=max_attempts,
-            retry_exit_codes=task.retry.get("retry_exit_codes"),
-            auto_resume_max_attempts=task.retry.get("auto_resume_max_attempts"),
-            auto_resume_exit_codes=task.retry.get("auto_resume_exit_codes"),
+            run_dir,
+            args.gpu,
+            state,
+            wb_run,
+            interval=int(task.runtime.get("log_system_every_seconds", 30)),
         )
-        if wb_run is not None:
-            wb_run.summary["status"] = status
-            wb_run.summary["error"] = message
-            wb_run.summary["oom_detected"] = is_oom
-            if os.environ.get("LTX_WANDB_ALERTS", "critical").lower() not in {"false", "off", "0"}:
-                try:
-                    import wandb
-                    wandb.alert(title=f"LongTail {status}: {task.method}", text=f"{task.stage}, seed {task.seed}: {message}")
-                except Exception:
-                    pass
+        monitor.start()
+        metrics = _run_task(
+            task, root, args.gpu, batch_size, run_dir, state, wb_run
+        )
+        _mark_success(task, run_dir, state, wb_run, metrics)
+        exit_code = 0
+    except Exception as exc:
+        if isinstance(exc, PhaseFailed):
+            exit_code = exc.exit_code
+        traceback.print_exc()
+        _mark_failure(task, run_dir, state, wb_run, exit_code, exc)
     finally:
         if monitor is not None:
             monitor.stop()
             monitor.join(timeout=5)
             monitor.finalize()
-        if wb_run is not None:
-            try:
-                if task.runtime.get("upload_stdout_artifact", True) and stdout_log.exists():
-                    import wandb
-                    artifact = wandb.Artifact(f"logs-{task.id}", type="run-logs")
-                    artifact.add_file(str(stdout_log))
-                    artifact.add_file(str(run_dir / "task.resolved.json"))
-                    artifact.add_file(str(run_dir / "provenance.json"))
-                    if (run_dir / "RESUME_SOURCE.json").exists():
-                        artifact.add_file(str(run_dir / "RESUME_SOURCE.json"))
-                    if (run_dir / "metrics.collected.json").exists():
-                        artifact.add_file(str(run_dir / "metrics.collected.json"))
-                    wb_run.log_artifact(artifact)
-                wb_run.finish(exit_code=exit_code)
-            except Exception:
-                pass
+        _finish_wandb(task, run_dir, wb_run, exit_code)
         state.close()
     raise SystemExit(exit_code)
 

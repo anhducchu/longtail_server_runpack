@@ -574,38 +574,42 @@ def _per_class_payload(args, generated_features: np.ndarray, reference_features:
     }
 
 
-def _evaluate(args, images: np.ndarray, labels: np.ndarray, counts: np.ndarray) -> dict:
-    """Run one protocol, publishing fast previews separately from paper output."""
-    if args.mode == "gpu_fast":
-        args.metric_backend = "gpu"
-        metrics, generated_features, reference_features = _collect_gpu_fast_metrics(args, images)
-        protocol = _base_protocol(args)
-        protocol.update({
-            "evaluation_mode": "gpu_fast",
-            "paper_report_ready": False,
-            "metric_backend": "cuda_preview",
-            "omitted_metrics": ["F_8", "F_1_8", "ImprovedPrecision", "Recall"],
-            "important_caveat": (
-                "Preview only: FID/KID and optional per-class/split FIDs use CUDA "
-                "kernels with the same mathematical definitions, while canonical "
-                "paper PRD and VGG improved-PRD are intentionally omitted."
-            ),
-        })
-        if args.per_class_output is not None:
-            per_class_payload = _per_class_payload(
-                args, generated_features, reference_features, labels
-            )
-            for name, group in per_class_payload["groups"].items():
-                metrics[f"{name}_FID"] = float(group["FID"])
-            _atomic_write_json(args.per_class_output, per_class_payload)
-        payload = {
-            "metrics": metrics,
-            "protocol": protocol,
-            "label_histogram": counts.tolist(),
-        }
-        _atomic_write_json(args.output, payload)
-        return payload
+def _evaluate_gpu_fast(
+    args, images: np.ndarray, labels: np.ndarray, counts: np.ndarray
+) -> dict:
+    args.metric_backend = "gpu"
+    metrics, generated_features, reference_features = _collect_gpu_fast_metrics(args, images)
+    protocol = _base_protocol(args)
+    protocol.update({
+        "evaluation_mode": "gpu_fast",
+        "paper_report_ready": False,
+        "metric_backend": "cuda_preview",
+        "omitted_metrics": ["F_8", "F_1_8", "ImprovedPrecision", "Recall"],
+        "important_caveat": (
+            "Preview only: FID/KID and optional per-class/split FIDs use CUDA "
+            "kernels; canonical Inception PRD and VGG improved-PRD are omitted."
+        ),
+    })
+    if args.per_class_output is not None:
+        per_class = _per_class_payload(
+            args, generated_features, reference_features, labels
+        )
+        for name, group in per_class["groups"].items():
+            metrics[f"{name}_FID"] = float(group["FID"])
+        _atomic_write_json(args.per_class_output, per_class)
 
+    payload = {
+        "metrics": metrics,
+        "protocol": protocol,
+        "label_histogram": counts.tolist(),
+    }
+    _atomic_write_json(args.output, payload)
+    return payload
+
+
+def _evaluate_detailed(
+    args, images: np.ndarray, labels: np.ndarray, counts: np.ndarray
+) -> dict:
     headline_metrics, generated_features, reference_features = _collect_headline_metrics(args, images)
     protocol = _base_protocol(args)
     protocol["kid"] = {
@@ -620,12 +624,16 @@ def _evaluate(args, images: np.ndarray, labels: np.ndarray, counts: np.ndarray) 
         "protocol": _headline_protocol(protocol),
         "label_histogram": counts.tolist(),
     }
-    # The primary path becomes available as a valid headline report immediately;
-    # detailed mode atomically replaces it only after all optional work succeeds.
+    # Keep a valid partial result if an expensive later metric is interrupted.
     _atomic_write_json(args.output, headline_payload)
+
     metrics = dict(headline_metrics)
-    reference_vgg_features = np.load(args.metrics_root / f"{_DATASET}_vgg16_fc2.npy", mmap_mode="r")
-    reference_radii = np.load(args.metrics_root / f"{_DATASET}_vgg16_fc2_k3_radii.npy", mmap_mode="r")
+    reference_vgg_features = np.load(
+        args.metrics_root / f"{_DATASET}_vgg16_fc2.npy", mmap_mode="r"
+    )
+    reference_radii = np.load(
+        args.metrics_root / f"{_DATASET}_vgg16_fc2_k3_radii.npy", mmap_mode="r"
+    )
     precision, recall = improved_prd_vgg16_k3(
         np.asarray(images),
         np.asarray(reference_vgg_features),
@@ -646,7 +654,14 @@ def _evaluate(args, images: np.ndarray, labels: np.ndarray, counts: np.ndarray) 
     return payload
 
 
-def main() -> None:
+def _evaluate(args, images: np.ndarray, labels: np.ndarray, counts: np.ndarray) -> dict:
+    """Dispatch one of the two supported evaluation modes."""
+    if args.mode == "gpu_fast":
+        return _evaluate_gpu_fast(args, images, labels, counts)
+    return _evaluate_detailed(args, images, labels, counts)
+
+
+def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", type=Path, required=True)
     parser.add_argument("--samples", type=Path, required=True)
@@ -683,6 +698,10 @@ def main() -> None:
     args.samples = Path(args.samples).resolve()
     if args.generated_features_cache is not None:
         args.generated_features_cache = Path(args.generated_features_cache).resolve()
+    return args
+
+
+def _load_inputs(args) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     images = np.load(args.samples, mmap_mode="r")
     labels = np.load(args.labels, mmap_mode="r")
     if images.shape != (_NUM_SAMPLES, 3, 32, 32) or labels.shape != (_NUM_SAMPLES,):
@@ -694,8 +713,14 @@ def main() -> None:
     expected_count = _NUM_SAMPLES // _NUM_CLASSES
     if len(counts) != _NUM_CLASSES or np.any(counts != expected_count):
         raise ValueError(f"labels are not exactly class-uniform: {counts.tolist()}")
+    return images, labels_array, counts
+
+
+def main() -> None:
+    args = _parse_args()
+    images, labels, counts = _load_inputs(args)
     os.environ["LTX_METRICS_ROOT"] = str(args.metrics_root.resolve())
-    payload = _evaluate(args, images, labels_array, counts)
+    payload = _evaluate(args, images, labels, counts)
     print(json.dumps(payload["metrics"], sort_keys=True))
 
 

@@ -1,3 +1,5 @@
+"""Shared file, environment, hashing, and subprocess helpers."""
+
 from __future__ import annotations
 
 import hashlib
@@ -8,7 +10,8 @@ import shlex
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Iterable, Mapping
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}")
 
@@ -26,8 +29,8 @@ def expand_env(value: Any) -> Any:
     return value
 
 
-def deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> Dict[str, Any]:
-    out: Dict[str, Any] = dict(base)
+def deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = dict(base)
     for key, value in override.items():
         if key in out and isinstance(out[key], dict) and isinstance(value, dict):
             out[key] = deep_merge(out[key], value)

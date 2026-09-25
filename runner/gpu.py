@@ -1,3 +1,5 @@
+"""Small wrappers around nvidia-smi and GPU slot calculation."""
+
 from __future__ import annotations
 
 import csv
@@ -5,7 +7,6 @@ import io
 import math
 import subprocess
 from dataclasses import dataclass
-from typing import Dict, List
 
 
 @dataclass
@@ -15,7 +16,7 @@ class GPU:
     memory_free_mb: float
 
 
-def query_gpus() -> List[GPU]:
+def query_gpus() -> list[GPU]:
     fields = "index,name,memory.free"
     proc = subprocess.run(
         ["nvidia-smi", f"--query-gpu={fields}", "--format=csv,noheader,nounits"],
@@ -23,7 +24,7 @@ def query_gpus() -> List[GPU]:
     )
     if proc.returncode != 0:
         return []
-    gpus: List[GPU] = []
+    gpus: list[GPU] = []
     for row in csv.reader(io.StringIO(proc.stdout)):
         if len(row) < 3:
             continue
@@ -37,7 +38,7 @@ def query_gpus() -> List[GPU]:
     return gpus
 
 
-def query_compute_apps() -> Dict[int, float]:
+def query_compute_apps() -> dict[int, float]:
     """Map pid -> used_gpu_memory_mb for every process nvidia-smi can see.
 
     Used to measure a single task's own footprint instead of the whole
@@ -50,7 +51,7 @@ def query_compute_apps() -> Dict[int, float]:
     )
     if proc.returncode != 0:
         return {}
-    apps: Dict[int, float] = {}
+    apps: dict[int, float] = {}
     for row in csv.reader(io.StringIO(proc.stdout)):
         if len(row) < 2:
             continue
@@ -62,14 +63,14 @@ def query_compute_apps() -> Dict[int, float]:
 
 
 def plan_slots(
-    gpus: List[GPU],
+    gpus: list[GPU],
     *,
     tasks_per_gpu: "int | str" = "auto",
     task_memory_gb: float = 12.0,
     headroom_gb: float = 4.0,
     ceiling: int = 4,
-    running_on: "Dict[int, int] | None" = None,
-) -> Dict[int, int]:
+    running_on: dict[int, int] | None = None,
+) -> dict[int, int]:
     """Decide how many concurrent tasks each GPU may host.
 
     ``tasks_per_gpu`` an int pins every GPU to that count. ``"auto"`` divides
@@ -84,7 +85,7 @@ def plan_slots(
     tenants is deliberately not added back — that is not ours to reclaim.
     """
     running_on = running_on or {}
-    slots: Dict[int, int] = {}
+    slots: dict[int, int] = {}
     for gpu in gpus:
         if isinstance(tasks_per_gpu, int):
             slots[gpu.index] = max(1, tasks_per_gpu)

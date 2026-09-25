@@ -1,15 +1,16 @@
+"""Assign pending tasks to GPUs and supervise their worker processes."""
+
 from __future__ import annotations
 
-import os
 import hashlib
 import json
+import os
 import shutil
 import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List
 
 from .config import LoadedCampaign
 from .gpu import plan_slots, query_gpus
@@ -33,18 +34,18 @@ class Scheduler:
         ).hexdigest()
         self.state.initialize(campaign.tasks, campaign_fingerprint=self.campaign_fingerprint)
         (self.campaign_dir / "campaign_fingerprint.txt").write_text(self.campaign_fingerprint + "\n", encoding="utf-8")
-        self.processes: Dict[str, subprocess.Popen] = {}
+        self.processes: dict[str, subprocess.Popen] = {}
         self.stop_requested = False
-        self.launcher_logs: Dict[str, object] = {}
-        self._current_slots: Dict[int, int] = {}
-        self._last_printed_slots: Dict[int, int] = {}
-        self._last_launch_on_gpu: Dict[int, float] = {}
+        self.launcher_logs: dict[str, object] = {}
+        self._current_slots: dict[int, int] = {}
+        self._last_printed_slots: dict[int, int] = {}
+        self._last_launch_on_gpu: dict[int, float] = {}
 
     def _signal(self, signum, frame):
         self.stop_requested = True
         print(f"[runner] scheduler received signal {signum}; no new jobs will be started", flush=True)
 
-    def _allowed_gpus(self) -> List[int]:
+    def _allowed_gpus(self) -> list[int]:
         configured = self.campaign.server.get("machine", {}).get("gpu_ids", "auto")
         detected = [g.index for g in query_gpus()]
         if configured == "auto":
@@ -68,16 +69,16 @@ class Scheduler:
             best = max(best, peak)
         return best * 1.15 if best > 0 else 12.0
 
-    def _running_on(self) -> Dict[int, int]:
+    def _running_on(self) -> dict[int, int]:
         """How many of our own tasks currently occupy each GPU."""
-        counts: Dict[int, int] = {}
+        counts: dict[int, int] = {}
         for row in self.state.rows("running"):
             gpu_id = row.get("gpu_id")
             if gpu_id is not None:
                 counts[int(gpu_id)] = counts.get(int(gpu_id), 0) + 1
         return counts
 
-    def _compute_slots(self, running_on: Dict[int, int] | None = None) -> Dict[int, int]:
+    def _compute_slots(self, running_on: dict[int, int] | None = None) -> dict[int, int]:
         machine = self.campaign.server.get("machine", {})
         allowed = set(self._allowed_gpus())
         gpus = [g for g in query_gpus() if g.index in allowed]
@@ -87,7 +88,11 @@ class Scheduler:
             tasks_per_gpu_cfg = int(tasks_per_gpu_cfg)
 
         task_memory_cfg = machine.get("task_gpu_memory_gb", "auto")
-        task_memory_gb = self._task_memory_estimate_gb() if task_memory_cfg == "auto" else float(task_memory_cfg)
+        task_memory_gb = (
+            self._task_memory_estimate_gb()
+            if task_memory_cfg == "auto"
+            else float(task_memory_cfg)
+        )
 
         slots = plan_slots(
             gpus,
@@ -103,7 +108,7 @@ class Scheduler:
         self._current_slots = slots
         return slots
 
-    def _available_slots(self) -> List[int]:
+    def _available_slots(self) -> list[int]:
         """GPU indices with open capacity right now (may repeat a GPU index)."""
         machine = self.campaign.server.get("machine", {})
         min_free_mb = float(machine.get("min_free_gpu_memory_gb", 0)) * 1024
@@ -114,7 +119,7 @@ class Scheduler:
         slots = self._compute_slots(running_on)
 
         now = time.time()
-        available: List[int] = []
+        available: list[int] = []
         for gpu in gpus:
             if gpu.memory_free_mb < min_free_mb:
                 continue
@@ -137,7 +142,7 @@ class Scheduler:
             return False
         return True
 
-    def _worker_env(self) -> Dict[str, str]:
+    def _worker_env(self) -> dict[str, str]:
         env = os.environ.copy()
         total_slots = sum(self._current_slots.values()) or 1
         max_workers = int(self.campaign.server.get("machine", {}).get("max_dataloader_workers", 8))
@@ -199,6 +204,29 @@ class Scheduler:
             if handle is not None:
                 handle.close()
 
+    def _ready_tasks(self, rows: list[dict]) -> list[dict]:
+        retry_delay = float(
+            self.campaign.server.get("retry", {}).get("retry_delay_seconds", 0)
+        )
+        now = time.time()
+        return [
+            row
+            for row in rows
+            if row["status"] == "pending"
+            or (
+                row["status"] == "retry"
+                and now - float(row.get("finished_at") or 0) >= retry_delay
+            )
+        ]
+
+    def _launch_ready_tasks(self, rows: list[dict], max_concurrent) -> None:
+        available_gpus = self._available_slots()
+        if max_concurrent != "auto":
+            running = len(self.state.rows("running"))
+            available_gpus = available_gpus[: max(0, int(max_concurrent) - running)]
+        for row, gpu_id in zip(self._ready_tasks(rows), available_gpus):
+            self._launch(row["id"], gpu_id)
+
     def run(self) -> int:
         signal.signal(signal.SIGTERM, self._signal)
         signal.signal(signal.SIGINT, self._signal)
@@ -209,10 +237,18 @@ class Scheduler:
         if not allowed:
             print("[runner] no NVIDIA GPUs detected", flush=True)
             return 2
-        max_concurrent_cfg = machine.get("max_concurrent", "auto")
+        max_concurrent = machine.get("max_concurrent", "auto")
         initial_slots = self._compute_slots()
-        display_cap = f"auto({sum(initial_slots.values())})" if max_concurrent_cfg == "auto" else max_concurrent_cfg
-        print(f"[runner] campaign={self.campaign.raw['campaign']['name']} GPUs={allowed} max_concurrent={display_cap}", flush=True)
+        display_cap = (
+            f"auto({sum(initial_slots.values())})"
+            if max_concurrent == "auto"
+            else max_concurrent
+        )
+        print(
+            f"[runner] campaign={self.campaign.raw['campaign']['name']} "
+            f"GPUs={allowed} max_concurrent={display_cap}",
+            flush=True,
+        )
 
         while True:
             self._reap()
@@ -220,27 +256,21 @@ class Scheduler:
             if recovered:
                 print(f"[runner] recovered {recovered} stale worker(s)", flush=True)
             rows = self.state.rows()
-            if rows and all(r["status"] in TERMINAL for r in rows):
+            if rows and all(row["status"] in TERMINAL for row in rows):
                 break
             if not self.stop_requested and self._disk_ok():
-                retry_delay = float(self.campaign.server.get("retry", {}).get("retry_delay_seconds", 0))
-                now = time.time()
-                pending = [r for r in rows if r["status"] == "pending" or
-                           (r["status"] == "retry" and now - float(r.get("finished_at") or 0) >= retry_delay)]
-                available = self._available_slots()
-                if max_concurrent_cfg != "auto":
-                    running_count = len(self.state.rows("running"))
-                    cap = max(0, int(max_concurrent_cfg) - running_count)
-                    available = available[:cap]
-                for row, gpu_id in zip(pending, available):
-                    self._launch(row["id"], gpu_id)
+                self._launch_ready_tasks(rows, max_concurrent)
             if self.stop_requested and not self.processes:
                 break
             time.sleep(poll)
 
         rows = self.state.rows()
-        completed = sum(r["status"] == "completed" for r in rows)
-        failed = sum(r["status"] == "failed" for r in rows)
-        print(f"[runner] campaign finished completed={completed} failed={failed} total={len(rows)}", flush=True)
+        completed = sum(row["status"] == "completed" for row in rows)
+        failed = sum(row["status"] == "failed" for row in rows)
+        print(
+            f"[runner] campaign finished completed={completed} "
+            f"failed={failed} total={len(rows)}",
+            flush=True,
+        )
         self.state.close()
         return 1 if failed else 0

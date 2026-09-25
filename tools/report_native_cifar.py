@@ -228,33 +228,34 @@ def _maybe_upload_wandb(campaign: LoadedCampaign, output: Path, rows: list[dict[
         print(f"[report] W&B upload skipped/failed: {exc}")
 
 
-def main() -> int:
+def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     parser.add_argument("--output", default="")
     parser.add_argument("--wandb", action="store_true")
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    campaign = load_campaign(args.config)
+
+def _expected_seeds(campaign: LoadedCampaign) -> list[int]:
     if campaign.raw.get("campaign", {}).get("protocol") != "native_cifar_v1":
         raise ValueError("report_native_cifar.py only accepts protocol=native_cifar_v1")
-    expected_seeds = sorted(set(map(int, campaign.raw.get("campaign", {}).get("paired_seeds", []))))
+    expected_seeds = sorted(
+        set(map(int, campaign.raw.get("campaign", {}).get("paired_seeds", [])))
+    )
     if not expected_seeds:
         raise ValueError("native_cifar_v1 report requires at least one campaign.paired_seeds entry")
     if not campaign.tasks:
         raise ValueError("native_cifar_v1 report requires at least one task")
+    return expected_seeds
 
-    load_runtime_env(campaign.root)
-    output = Path(args.output) if args.output else (
-        Path(campaign.server["runtime"]["runs_root"]) / campaign.raw["campaign"]["name"] / "report"
-    )
-    output.mkdir(parents=True, exist_ok=True)
 
-    rows: list[dict[str, Any]] = []
+def _collect_rows(campaign: LoadedCampaign) -> list[dict[str, Any]]:
+    rows = []
     for task in campaign.tasks:
         run_dir = Path(task.run_dir)
         metrics = read_metrics(run_dir)
         per_class_status, per_class = read_per_class_metrics(run_dir)
+
         reasons = []
         if not (run_dir / "SUCCESS").is_file():
             reasons.append("missing SUCCESS")
@@ -275,6 +276,16 @@ def main() -> int:
             "run_dir": str(run_dir),
             "per_class": per_class,
         })
+    return rows
+
+
+def _write_report(
+    campaign: LoadedCampaign,
+    output: Path,
+    rows: list[dict[str, Any]],
+    expected_seeds: list[int],
+) -> list[dict[str, Any]]:
+    output.mkdir(parents=True, exist_ok=True)
 
     _write_per_seed(output, rows)
     aggregate = _aggregate(rows, expected_seeds)
@@ -282,6 +293,22 @@ def main() -> int:
     payload = _summary_payload(campaign, rows, aggregate, per_class_aggregate)
     (output / "summary.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     _write_results_log(output, payload)
+    return aggregate
+
+
+def main() -> int:
+    args = _parse_args()
+    campaign = load_campaign(args.config)
+    expected_seeds = _expected_seeds(campaign)
+
+    load_runtime_env(campaign.root)
+    output = Path(args.output) if args.output else (
+        Path(campaign.server["runtime"]["runs_root"])
+        / campaign.raw["campaign"]["name"]
+        / "report"
+    )
+    rows = _collect_rows(campaign)
+    aggregate = _write_report(campaign, output, rows, expected_seeds)
     if args.wandb:
         _maybe_upload_wandb(campaign, output, rows, aggregate)
 
