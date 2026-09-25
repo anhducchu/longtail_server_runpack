@@ -10,24 +10,51 @@ Archived research code is preserved on the local branch
 
 ## Start here
 
-- To understand the repo, start at `main.py`.
+- To understand the repo, open `main.py` and start at its `main()` function.
 - To run the full server workflow, use `scripts/run.sh`.
-- To inspect training or sampling, read `third_party/CCUA-DDPM/main.py` only
-  after the runner flow is clear.
+- Scientific parameters live in `configs/native_cifar100_if100.yaml`; machine
+  and retry parameters live in `configs/server.yaml`.
 
 ```text
-main.py
-  -> runner/config.py
-  -> runner/preflight.py
-  -> runner/scheduler.py
-  -> runner/worker.py
-  -> runner/adapter.py
-  -> third_party/CCUA-DDPM/main.py
-  -> tools/evaluate_ccua.py / tools/report_native_cifar.py
+main.py:main()
+  -> main.py:run_campaign()                    load config + preflight
+  -> runner/scheduler.py:Scheduler.run()       choose GPU and launch tasks
+  -> runner/worker.py:main()                   execute one task safely
+  -> runner/adapter.py:CCUAAdapter.phases()    train -> sample -> metrics
+  -> third_party/CCUA-DDPM/main.py:train()     data, U-Net, optimizer, loop
+  -> third_party/CCUA-DDPM/diffusion.py:
+       GaussianDiffusionTrainer.forward()      DDPM/CBDM/T2H/CCUA objective
 ```
 
 There is no installable framework layer. `main.py` is the CLI; `runner/`
 contains only the infrastructure needed to execute and recover experiments.
+
+The important handoff is in `CCUAAdapter._train_phase()`: it translates one
+resolved task into the arguments for the vendored trainer. In that trainer,
+`train()` constructs `GaussianDiffusionTrainer`; its `forward()` computes the
+four loss components, and the training loop combines the components enabled by
+the chosen objective. Sampling follows the same path through
+`CCUAAdapter._sample_phase()` to `third_party/CCUA-DDPM/main.py:sample()`.
+
+| Objective | Adapter enables | Training objective |
+| --- | --- | --- |
+| DDPM | no additional flag | DDPM noise-prediction loss |
+| CBDM | `cbdm`, `cb_tau` | DDPM + CBDM balancing loss |
+| T2H | `transfer_x0` | DDPM loss with the transferred target |
+| CCUA | `ccua_al`, `ccua_ucl` | DDPM + alignment + unconditional contrastive loss |
+
+### Where parameters come from
+
+| Parameter type | Source | Examples |
+| --- | --- | --- |
+| Scientific contract | `configs/native_cifar100_if100.yaml` | objective, seeds, batch size, learning rate, diffusion steps, sampling |
+| Machine policy | `configs/server.yaml` | GPUs, concurrency, storage roots, retry, checkpoint interval |
+| One-launch override | `python main.py run --help` | selected GPUs, job limit, explicit resume checkpoint |
+| Local environment | `.env.local` | paths, W&B credentials and mode |
+
+`runner/config.py:load_campaign()` merges those files into concrete `Task`
+objects. From that point onward, scheduler, worker, and adapter receive resolved
+values; they do not invent another scientific configuration layer.
 
 ## Repository map
 

@@ -24,6 +24,21 @@ def test_main_script_exposes_the_cli():
         assert command in result.stdout
 
 
+def test_run_help_explains_its_overrides():
+    result = subprocess.run(
+        [sys.executable, "main.py", "run", "--help"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "campaign YAML" in result.stdout
+    assert "concurrent tasks per GPU" in result.stdout
+    assert "checkpoint path" in result.stdout
+
+
 def test_run_overrides_machine_limits():
     campaign = load_campaign(CONFIG)
     apply_run_overrides(campaign, gpus="1,3", per_gpu=2, jobs="auto")

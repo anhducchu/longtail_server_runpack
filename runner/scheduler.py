@@ -30,16 +30,78 @@ class Scheduler:
         self.state = StateDB(self.state_path)
         canonical_tasks = [task.to_dict() for task in campaign.tasks]
         self.campaign_fingerprint = hashlib.sha256(
-            json.dumps(canonical_tasks, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            json.dumps(
+                canonical_tasks,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
         ).hexdigest()
-        self.state.initialize(campaign.tasks, campaign_fingerprint=self.campaign_fingerprint)
-        (self.campaign_dir / "campaign_fingerprint.txt").write_text(self.campaign_fingerprint + "\n", encoding="utf-8")
+        self.state.initialize(
+            campaign.tasks,
+            campaign_fingerprint=self.campaign_fingerprint,
+        )
+        (self.campaign_dir / "campaign_fingerprint.txt").write_text(
+            self.campaign_fingerprint + "\n",
+            encoding="utf-8",
+        )
         self.processes: dict[str, subprocess.Popen] = {}
         self.stop_requested = False
         self.launcher_logs: dict[str, object] = {}
         self._current_slots: dict[int, int] = {}
         self._last_printed_slots: dict[int, int] = {}
         self._last_launch_on_gpu: dict[int, float] = {}
+
+    def run(self) -> int:
+        """Assign ready tasks to GPUs until every task reaches a final state."""
+        signal.signal(signal.SIGTERM, self._signal)
+        signal.signal(signal.SIGINT, self._signal)
+        self.state.reset_stale_running()
+
+        machine = self.campaign.server.get("machine", {})
+        poll_seconds = int(machine.get("poll_seconds", 20))
+        allowed_gpus = self._allowed_gpus()
+        if not allowed_gpus:
+            print("[runner] no NVIDIA GPUs detected", flush=True)
+            return 2
+
+        max_concurrent = machine.get("max_concurrent", "auto")
+        initial_slots = self._compute_slots()
+        display_cap = (
+            f"auto({sum(initial_slots.values())})"
+            if max_concurrent == "auto"
+            else max_concurrent
+        )
+        print(
+            f"[runner] campaign={self.campaign.raw['campaign']['name']} "
+            f"GPUs={allowed_gpus} max_concurrent={display_cap}",
+            flush=True,
+        )
+
+        while True:
+            self._reap()
+            recovered = self.state.reset_stale_running()
+            if recovered:
+                print(f"[runner] recovered {recovered} stale worker(s)", flush=True)
+
+            rows = self.state.rows()
+            if rows and all(row["status"] in TERMINAL for row in rows):
+                break
+            if not self.stop_requested and self._disk_ok():
+                self._launch_ready_tasks(rows, max_concurrent)
+            if self.stop_requested and not self.processes:
+                break
+            time.sleep(poll_seconds)
+
+        rows = self.state.rows()
+        completed = sum(row["status"] == "completed" for row in rows)
+        failed = sum(row["status"] == "failed" for row in rows)
+        print(
+            f"[runner] campaign finished completed={completed} "
+            f"failed={failed} total={len(rows)}",
+            flush=True,
+        )
+        self.state.close()
+        return 1 if failed else 0
 
     def _signal(self, signum, frame):
         self.stop_requested = True
@@ -226,51 +288,3 @@ class Scheduler:
             available_gpus = available_gpus[: max(0, int(max_concurrent) - running)]
         for row, gpu_id in zip(self._ready_tasks(rows), available_gpus):
             self._launch(row["id"], gpu_id)
-
-    def run(self) -> int:
-        signal.signal(signal.SIGTERM, self._signal)
-        signal.signal(signal.SIGINT, self._signal)
-        self.state.reset_stale_running()
-        machine = self.campaign.server.get("machine", {})
-        poll = int(machine.get("poll_seconds", 20))
-        allowed = self._allowed_gpus()
-        if not allowed:
-            print("[runner] no NVIDIA GPUs detected", flush=True)
-            return 2
-        max_concurrent = machine.get("max_concurrent", "auto")
-        initial_slots = self._compute_slots()
-        display_cap = (
-            f"auto({sum(initial_slots.values())})"
-            if max_concurrent == "auto"
-            else max_concurrent
-        )
-        print(
-            f"[runner] campaign={self.campaign.raw['campaign']['name']} "
-            f"GPUs={allowed} max_concurrent={display_cap}",
-            flush=True,
-        )
-
-        while True:
-            self._reap()
-            recovered = self.state.reset_stale_running()
-            if recovered:
-                print(f"[runner] recovered {recovered} stale worker(s)", flush=True)
-            rows = self.state.rows()
-            if rows and all(row["status"] in TERMINAL for row in rows):
-                break
-            if not self.stop_requested and self._disk_ok():
-                self._launch_ready_tasks(rows, max_concurrent)
-            if self.stop_requested and not self.processes:
-                break
-            time.sleep(poll)
-
-        rows = self.state.rows()
-        completed = sum(row["status"] == "completed" for row in rows)
-        failed = sum(row["status"] == "failed" for row in rows)
-        print(
-            f"[runner] campaign finished completed={completed} "
-            f"failed={failed} total={len(rows)}",
-            flush=True,
-        )
-        self.state.close()
-        return 1 if failed else 0

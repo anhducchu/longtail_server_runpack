@@ -1,3 +1,9 @@
+"""Execute one resolved task from the scheduler.
+
+Start at ``main()``. The worker prepares logging and recovery, then
+``_run_task`` asks the adapter for the ordered train, sample, and metric phases.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -21,8 +27,66 @@ from .state import StateDB
 from .utils import atomic_write_json, run_capture, shell_join, stable_id
 
 
+# Start here when following a task launched by Scheduler._launch.
+def main() -> None:
+    args = _parse_args()
+    root = Path(args.root)
+    state = StateDB(Path(args.state))
+    row = state.get(args.task)
+    task = Task(**row["task"])
+    state.mark_started(task.id, os.getpid())
+    run_dir, batch_size, effective_batch = _prepare_run(task, row, args.gpu, root)
+
+    wb_run = None
+    monitor = None
+    exit_code = 1
+    try:
+        wb_run = init_wandb(task, run_dir)
+        define_wandb_metrics(wb_run)
+        if wb_run is not None:
+            wb_run.summary["status"] = "running"
+            wb_run.summary["gpu_id"] = args.gpu
+            wb_run.summary["effective_batch_size"] = effective_batch
+
+        monitor = Monitor(
+            task.id,
+            run_dir,
+            args.gpu,
+            state,
+            wb_run,
+            interval=int(task.runtime.get("log_system_every_seconds", 30)),
+        )
+        monitor.start()
+        metrics = _run_task(
+            task, root, args.gpu, batch_size, run_dir, state, wb_run
+        )
+        _mark_success(task, run_dir, state, wb_run, metrics)
+        exit_code = 0
+    except Exception as exc:
+        if isinstance(exc, PhaseFailed):
+            exit_code = exc.exit_code
+        traceback.print_exc()
+        _mark_failure(task, run_dir, state, wb_run, exit_code, exc)
+    finally:
+        if monitor is not None:
+            monitor.stop()
+            monitor.join(timeout=5)
+            monitor.finalize()
+        _finish_wandb(task, run_dir, wb_run, exit_code)
+        state.close()
+    raise SystemExit(exit_code)
+
+
 class Monitor(threading.Thread):
-    def __init__(self, task_id: str, run_dir: Path, gpu_id: int, state: StateDB, wb_run, interval: int = 30):
+    def __init__(
+        self,
+        task_id: str,
+        run_dir: Path,
+        gpu_id: int,
+        state: StateDB,
+        wb_run,
+        interval: int = 30,
+    ):
         super().__init__(daemon=True)
         self.task_id = task_id
         self.run_dir = run_dir
@@ -40,9 +104,14 @@ class Monitor(threading.Thread):
 
     def _write_footprint(self) -> None:
         if self.peak_memory_gb > 0:
-            atomic_write_json(self.run_dir / "gpu_footprint.json", {
-                "task_id": self.task_id, "gpu_id": self.gpu_id, "peak_memory_gb": self.peak_memory_gb,
-            })
+            atomic_write_json(
+                self.run_dir / "gpu_footprint.json",
+                {
+                    "task_id": self.task_id,
+                    "gpu_id": self.gpu_id,
+                    "peak_memory_gb": self.peak_memory_gb,
+                },
+            )
 
     def finalize(self) -> None:
         """Write the final footprint reading once the task has stopped."""
@@ -561,55 +630,6 @@ def _finish_wandb(task: Task, run_dir: Path, wb_run, exit_code: int) -> None:
         wb_run.finish(exit_code=exit_code)
     except Exception:
         pass
-
-
-def main() -> None:
-    args = _parse_args()
-    root = Path(args.root)
-    state = StateDB(Path(args.state))
-    row = state.get(args.task)
-    task = Task(**row["task"])
-    state.mark_started(task.id, os.getpid())
-    run_dir, batch_size, effective_batch = _prepare_run(task, row, args.gpu, root)
-
-    wb_run = None
-    monitor = None
-    exit_code = 1
-    try:
-        wb_run = init_wandb(task, run_dir)
-        define_wandb_metrics(wb_run)
-        if wb_run is not None:
-            wb_run.summary["status"] = "running"
-            wb_run.summary["gpu_id"] = args.gpu
-            wb_run.summary["effective_batch_size"] = effective_batch
-
-        monitor = Monitor(
-            task.id,
-            run_dir,
-            args.gpu,
-            state,
-            wb_run,
-            interval=int(task.runtime.get("log_system_every_seconds", 30)),
-        )
-        monitor.start()
-        metrics = _run_task(
-            task, root, args.gpu, batch_size, run_dir, state, wb_run
-        )
-        _mark_success(task, run_dir, state, wb_run, metrics)
-        exit_code = 0
-    except Exception as exc:
-        if isinstance(exc, PhaseFailed):
-            exit_code = exc.exit_code
-        traceback.print_exc()
-        _mark_failure(task, run_dir, state, wb_run, exit_code, exc)
-    finally:
-        if monitor is not None:
-            monitor.stop()
-            monitor.join(timeout=5)
-            monitor.finalize()
-        _finish_wandb(task, run_dir, wb_run, exit_code)
-        state.close()
-    raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

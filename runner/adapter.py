@@ -117,6 +117,43 @@ class CCUAAdapter:
             return directory
         return Path(task.runtime["repos_root"]) / directory
 
+    def phases(self, task: Task, batch_size: int | None = None) -> list[Phase]:
+        """Build the task in execution order: train, sample, then metrics."""
+        repo = self.repo_dir(task)
+        run_dir = Path(task.run_dir)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        target = int(task.eval.get("checkpoint_step", task.train.get("total_steps", 300_000)))
+        batch = int(batch_size or task.train.get("batch_size", 64))
+
+        phases = [self._train_phase(task, repo, run_dir, batch, target)]
+        guidance_scales = self._guidance_scales(task)
+        single_scale = len(guidance_scales) == 1
+        for guidance_scale in guidance_scales:
+            suffix = "" if single_scale else f"_w{guidance_scale}"
+            sample_phase, samples, labels = self._sample_phase(
+                task,
+                repo,
+                run_dir,
+                batch,
+                target,
+                guidance_scale,
+                suffix,
+            )
+            phases.append(sample_phase)
+            if task.eval.get("paper_metrics", False):
+                phases.extend(
+                    self._metric_phases(
+                        task,
+                        repo,
+                        run_dir,
+                        samples,
+                        labels,
+                        suffix,
+                        single_scale,
+                    )
+                )
+        return phases
+
     @staticmethod
     def latest(run_dir: Path, target: int) -> int | None:
         """Return the newest checkpoint strictly before the target step."""
@@ -370,34 +407,3 @@ class CCUAAdapter:
             [task.method_config.get("guidance_scale", evaluate.get("guidance_scale", 1.0))],
         )
         return value if isinstance(value, list) else [value]
-
-    def phases(self, task: Task, batch_size: int | None = None) -> list[Phase]:
-        """Build the task in execution order: train, sample, preview, report."""
-        repo = self.repo_dir(task)
-        run_dir = Path(task.run_dir)
-        run_dir.mkdir(parents=True, exist_ok=True)
-        target = int(task.eval.get("checkpoint_step", task.train.get("total_steps", 300_000)))
-        batch = int(batch_size or task.train.get("batch_size", 64))
-
-        phases = [self._train_phase(task, repo, run_dir, batch, target)]
-        scales = self._guidance_scales(task)
-        single_scale = len(scales) == 1
-        for omega in scales:
-            suffix = "" if single_scale else f"_w{omega}"
-            sample_phase, samples, labels = self._sample_phase(
-                task, repo, run_dir, batch, target, omega, suffix
-            )
-            phases.append(sample_phase)
-            if task.eval.get("paper_metrics", False):
-                phases.extend(
-                    self._metric_phases(
-                        task,
-                        repo,
-                        run_dir,
-                        samples,
-                        labels,
-                        suffix,
-                        single_scale,
-                    )
-                )
-        return phases
