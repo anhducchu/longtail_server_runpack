@@ -7,11 +7,14 @@ Flow: load EMA score -> freeze theta -> train phi -> paired sample -> evaluate.
 from __future__ import annotations
 
 import argparse
+import subprocess
+import sys
 from pathlib import Path
 
 import torch
 
 from scaffold.common import (
+    ROOT,
     SCAFFOLD_ROOT,
     atomic_json,
     load_config,
@@ -31,8 +34,84 @@ from scaffold.sample import (
 from scaffold.train import train_scaffold
 
 
+def run_fixed_parallel(
+    args: argparse.Namespace,
+    config_path: Path,
+    score_checkpoint: Path,
+    output: Path,
+) -> None:
+    """Sample all five fixed conditions concurrently, then evaluate once."""
+    logs = output / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    workers = []
+    for condition, _label, _rho in FIXED_SWEEP:
+        command = [
+            sys.executable,
+            "-m",
+            "scaffold.run",
+            "fixed-condition",
+            "--config",
+            str(config_path),
+            "--checkpoint",
+            str(score_checkpoint),
+            "--name",
+            output.name,
+            "--device",
+            args.device,
+            "--condition",
+            condition,
+        ]
+        stream = (logs / f"{condition}.log").open("w", encoding="utf-8")
+        process = subprocess.Popen(
+            command,
+            cwd=ROOT,
+            stdout=stream,
+            stderr=subprocess.STDOUT,
+        )
+        workers.append((condition, process, stream))
+
+    atomic_json(
+        output / "parallel_workers.json",
+        {condition: process.pid for condition, process, _stream in workers},
+    )
+    failures = {}
+    for condition, process, stream in workers:
+        code = process.wait()
+        stream.close()
+        if code:
+            failures[condition] = code
+    atomic_json(
+        output / "parallel_exit_codes.json",
+        {condition: process.returncode for condition, process, _stream in workers},
+    )
+    if failures:
+        raise RuntimeError(f"fixed-condition workers failed: {failures}")
+
+    command = [
+        sys.executable,
+        "-m",
+        "scaffold.run",
+        "fixed-evaluate",
+        "--config",
+        str(config_path),
+        "--checkpoint",
+        str(score_checkpoint),
+        "--name",
+        output.name,
+    ]
+    with (logs / "evaluate.log").open("w", encoding="utf-8") as stream:
+        subprocess.run(
+            command,
+            cwd=ROOT,
+            stdout=stream,
+            stderr=subprocess.STDOUT,
+            check=True,
+        )
+
+
 def run(args: argparse.Namespace) -> None:
-    config = load_config(args.config.resolve())
+    config_path = args.config.resolve()
+    config = load_config(config_path)
     score_checkpoint = rooted_path(args.checkpoint)
     if not score_checkpoint.is_file():
         raise FileNotFoundError(score_checkpoint)
@@ -61,6 +140,9 @@ def run(args: argparse.Namespace) -> None:
         evaluate_conditions(config, output, fixed_conditions)
         result = write_fixed_sweep_table(output)
         print(f"[result] {result}")
+        return
+    if args.command == "fixed-parallel":
+        run_fixed_parallel(args, config_path, score_checkpoint, output)
         return
 
     device = torch.device(args.device)
@@ -141,6 +223,7 @@ def parse_args() -> argparse.Namespace:
             "fixed-sweep",
             "fixed-condition",
             "fixed-evaluate",
+            "fixed-parallel",
         ),
     )
     parser.add_argument(
