@@ -14,7 +14,7 @@ from scaffold.core import (
 from scaffold.common import OUTPUTS_ROOT, load_frozen_score, output_directory
 from scaffold.sample import FIXED_SWEEP, fixed_sweep_conditions, write_fixed_sweep_table
 from scaffold.train import training_signature
-from scaffold.run import run_fixed_parallel
+from scaffold.run import run_fixed_evaluate_parallel, run_fixed_parallel
 
 
 class TinyFrozenScore(nn.Module):
@@ -196,6 +196,45 @@ def test_fixed_parallel_limits_active_workers_to_two(tmp_path, monkeypatch):
     assert maximum == 2
     assert started == [condition for condition, _label, _rho in FIXED_SWEEP]
     assert "fixed-evaluate" in evaluated[0]
+
+
+def test_fixed_evaluation_limits_active_workers_to_two(tmp_path, monkeypatch):
+    active = 0
+    maximum = 0
+    started = []
+
+    class FakeProcess:
+        def __init__(self):
+            nonlocal active, maximum
+            self.pid = 2000 + len(started)
+            active += 1
+            maximum = max(maximum, active)
+
+        def wait(self):
+            nonlocal active
+            active -= 1
+            return 0
+
+    def fake_popen(command, **_kwargs):
+        started.append(command[command.index("--condition") + 1])
+        return FakeProcess()
+
+    monkeypatch.setattr("scaffold.run.subprocess.Popen", fake_popen)
+    monkeypatch.setattr(
+        "scaffold.run.write_fixed_sweep_table",
+        lambda output: output / "fixed_sweep_results.md",
+    )
+
+    result = run_fixed_evaluate_parallel(
+        SimpleNamespace(parallel_workers=2),
+        tmp_path / "config.yaml",
+        tmp_path / "checkpoint.pt",
+        tmp_path / "sweep",
+    )
+
+    assert maximum == 2
+    assert started == [condition for condition, _label, _rho in FIXED_SWEEP]
+    assert result.name == "fixed_sweep_results.md"
 
 
 def test_fixed_sweep_table_reads_canonical_metric_artifacts(tmp_path):

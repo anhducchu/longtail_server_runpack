@@ -102,6 +102,8 @@ def run_fixed_parallel(
         str(score_checkpoint),
         "--name",
         output.name,
+        "--parallel-workers",
+        str(args.parallel_workers),
     ]
     with (logs / "evaluate.log").open("w", encoding="utf-8") as stream:
         subprocess.run(
@@ -111,6 +113,63 @@ def run_fixed_parallel(
             stderr=subprocess.STDOUT,
             check=True,
         )
+
+
+def run_fixed_evaluate_parallel(
+    args: argparse.Namespace,
+    config_path: Path,
+    score_checkpoint: Path,
+    output: Path,
+) -> Path:
+    """Evaluate fixed conditions with the same bounded worker queue."""
+    logs = output / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    pending = list(FIXED_SWEEP)
+    active = []
+    completed = []
+    worker_pids = {}
+    failures = {}
+
+    def start_worker(condition: str):
+        command = [
+            sys.executable,
+            "-m",
+            "scaffold.run",
+            "fixed-evaluate-condition",
+            "--config",
+            str(config_path),
+            "--checkpoint",
+            str(score_checkpoint),
+            "--name",
+            output.name,
+            "--condition",
+            condition,
+        ]
+        stream = (logs / f"{condition}.evaluate.log").open("w", encoding="utf-8")
+        process = subprocess.Popen(
+            command,
+            cwd=ROOT,
+            stdout=stream,
+            stderr=subprocess.STDOUT,
+        )
+        worker_pids[condition] = process.pid
+        atomic_json(output / "evaluate_workers.json", worker_pids)
+        return condition, process, stream
+
+    while pending or active:
+        while pending and len(active) < args.parallel_workers:
+            condition, _label, _rho = pending.pop(0)
+            active.append(start_worker(condition))
+        condition, process, stream = active.pop(0)
+        code = process.wait()
+        stream.close()
+        completed.append((condition, code))
+        if code:
+            failures[condition] = code
+        atomic_json(output / "evaluate_exit_codes.json", dict(completed))
+    if failures:
+        raise RuntimeError(f"fixed-evaluate workers failed: {failures}")
+    return write_fixed_sweep_table(output)
 
 
 def run(args: argparse.Namespace) -> None:
@@ -139,10 +198,19 @@ def run(args: argparse.Namespace) -> None:
     if args.command == "evaluate":
         evaluate_conditions(config, output)
         return
+    if args.command == "fixed-evaluate-condition":
+        evaluate_conditions(
+            config,
+            output,
+            (args.condition,),
+            mode="fixed_table",
+            cache_features=False,
+        )
+        return
     if args.command == "fixed-evaluate":
-        fixed_conditions = tuple(condition for condition, _label, _rho in FIXED_SWEEP)
-        evaluate_conditions(config, output, fixed_conditions)
-        result = write_fixed_sweep_table(output)
+        result = run_fixed_evaluate_parallel(
+            args, config_path, score_checkpoint, output
+        )
         print(f"[result] {result}")
         return
     if args.command == "fixed-parallel":
@@ -183,7 +251,13 @@ def run(args: argparse.Namespace) -> None:
             device,
         )
         fixed_conditions = tuple(condition for condition, _label, _rho in FIXED_SWEEP)
-        evaluate_conditions(config, output, fixed_conditions)
+        evaluate_conditions(
+            config,
+            output,
+            fixed_conditions,
+            mode="fixed_table",
+            cache_features=False,
+        )
         result = write_fixed_sweep_table(output)
         print(f"[result] {result}")
     if args.command == "fixed-condition":
@@ -227,6 +301,7 @@ def parse_args() -> argparse.Namespace:
             "fixed-sweep",
             "fixed-condition",
             "fixed-evaluate",
+            "fixed-evaluate-condition",
             "fixed-parallel",
         ),
     )
@@ -247,13 +322,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--condition",
         choices=tuple(condition for condition, _label, _rho in FIXED_SWEEP),
-        help="single fixed-sweep row; only valid with fixed-condition",
+        help="single fixed-sweep row for sampling or evaluation",
     )
     args = parser.parse_args()
-    if args.command == "fixed-condition" and args.condition is None:
-        parser.error("fixed-condition requires --condition")
-    if args.command != "fixed-condition" and args.condition is not None:
-        parser.error("--condition is only valid with fixed-condition")
+    condition_commands = {"fixed-condition", "fixed-evaluate-condition"}
+    if args.command in condition_commands and args.condition is None:
+        parser.error(f"{args.command} requires --condition")
+    if args.command not in condition_commands and args.condition is not None:
+        parser.error("--condition is only valid with a single-condition command")
     if args.parallel_workers < 1:
         parser.error("--parallel-workers must be positive")
     return args

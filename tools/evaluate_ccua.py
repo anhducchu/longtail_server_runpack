@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import numpy as np
@@ -476,6 +477,25 @@ def _collect_headline_metrics(
     return metrics, generated_features, reference_features
 
 
+def _collect_fixed_table_metrics(
+    args, images: np.ndarray
+) -> tuple[dict, np.ndarray, np.ndarray]:
+    """Compute only the Inception metrics required by the fixed-sweep table."""
+    generated_features, _is_score = _cached_inception_features_and_is(args, images)
+    reference_features = np.load(args.metrics_root / f"{_DATASET}_feats.npy", mmap_mode="r")
+    sys.path.insert(0, str(args.repo))
+    from score.fid import calculate_frechet_distance
+
+    with np.load(args.metrics_root / f"{_DATASET}.train.npz") as statistics:
+        fid = _fid_to_statistics(
+            generated_features,
+            statistics["mu"][:],
+            statistics["sigma"][:],
+            calculate_frechet_distance,
+        )
+    return {"FID": float(fid)}, generated_features, reference_features
+
+
 def _collect_gpu_fast_metrics(args, images: np.ndarray) -> tuple[dict, np.ndarray, np.ndarray]:
     """Compute the fast 50k preview without the CPU Inception PRD pass.
 
@@ -654,10 +674,76 @@ def _evaluate_detailed(
     return payload
 
 
+def _evaluate_fixed_table(
+    args, images: np.ndarray, labels: np.ndarray, counts: np.ndarray
+) -> dict:
+    """Compute exactly the FID/Recall columns consumed by the fixed-sweep table."""
+    started = time.perf_counter()
+    metrics, generated_features, reference_features = _collect_fixed_table_metrics(args, images)
+    print(
+        f"[metrics] fixed-table Inception + overall FID: {time.perf_counter() - started:.1f}s",
+        file=sys.stderr,
+        flush=True,
+    )
+    reference_vgg_features = np.load(
+        args.metrics_root / f"{_DATASET}_vgg16_fc2.npy", mmap_mode="r"
+    )
+    reference_radii = np.load(
+        args.metrics_root / f"{_DATASET}_vgg16_fc2_k3_radii.npy", mmap_mode="r"
+    )
+    stage = time.perf_counter()
+    precision, recall = improved_prd_vgg16_k3(
+        np.asarray(images),
+        np.asarray(reference_vgg_features),
+        np.asarray(reference_radii),
+        batch_size=args.vgg_batch_size,
+        query_batch=args.knn_query_batch,
+        device=getattr(args, "device", "cuda"),
+    )
+    metrics["ImprovedPrecision"] = float(precision)
+    metrics["Recall"] = float(recall)
+    print(
+        f"[metrics] fixed-table VGG precision/recall: {time.perf_counter() - stage:.1f}s",
+        file=sys.stderr,
+        flush=True,
+    )
+    if args.per_class_output is not None:
+        stage = time.perf_counter()
+        _atomic_write_json(
+            args.per_class_output,
+            _per_class_payload(args, generated_features, reference_features, labels),
+        )
+        print(
+            f"[metrics] fixed-table class/group FID: {time.perf_counter() - stage:.1f}s",
+            file=sys.stderr,
+            flush=True,
+        )
+    protocol = _base_protocol(args)
+    protocol.update({
+        "evaluation_mode": "fixed_table",
+        "paper_report_ready": True,
+        "omitted_metrics": ["IS", "IS_std", "F_8", "F_1_8", "KID"],
+        "important_caveat": (
+            "Only metrics consumed by the fixed-sweep table are computed; their "
+            "definitions are identical to detailed mode."
+        ),
+    })
+    payload = {"metrics": metrics, "protocol": protocol, "label_histogram": counts.tolist()}
+    _atomic_write_json(args.output, payload)
+    print(
+        f"[metrics] fixed-table total: {time.perf_counter() - started:.1f}s",
+        file=sys.stderr,
+        flush=True,
+    )
+    return payload
+
+
 def _evaluate(args, images: np.ndarray, labels: np.ndarray, counts: np.ndarray) -> dict:
-    """Dispatch one of the two supported evaluation modes."""
+    """Dispatch one of the supported evaluation modes."""
     if args.mode == "gpu_fast":
         return _evaluate_gpu_fast(args, images, labels, counts)
+    if args.mode == "fixed_table":
+        return _evaluate_fixed_table(args, images, labels, counts)
     return _evaluate_detailed(args, images, labels, counts)
 
 
@@ -669,8 +755,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--metrics-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
-        "--mode", choices=("detailed", "gpu_fast"), default="detailed",
-        help="detailed writes paper metrics; gpu_fast writes a CUDA preview",
+        "--mode", choices=("detailed", "gpu_fast", "fixed_table"), default="detailed",
+        help="detailed writes all paper metrics; fixed_table writes only exact table columns",
     )
     parser.add_argument(
         "--inception-batch-size", type=int, default=16,

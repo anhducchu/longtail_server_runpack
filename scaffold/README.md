@@ -112,7 +112,10 @@ với cùng config, checkpoint và `--name`; mỗi process nhận một trong c�
 năm kết thúc, chạy `fixed-evaluate` một lần để evaluate tuần tự và ghép bảng.
 
 Command gọn hơn dưới đây tự xếp hàng tối đa hai condition cùng lúc (khoảng 10 GB
-trên H100 hiện tại), sau đó evaluate và ghép bảng tự động:
+trên H100 hiện tại), sau đó evaluate tối đa hai condition cùng lúc và ghép bảng
+tự động. Fixed sweep chỉ tính đúng các cột bảng cần dùng; KID, IS và PRD-Inception
+không được chạy thừa. FID, group FID và Recall giữ nguyên định nghĩa của chế độ
+`detailed`.
 
 ```bash
 python -m scaffold.run fixed-parallel \

@@ -115,7 +115,7 @@ def test_headline_metrics_reuse_features_and_include_seeded_kid(tmp_path, monkey
     assert calls[0][4] == np.random.default_rng(2026).integers(1_000_000)
 
 
-@pytest.mark.parametrize("mode", ("detailed", "gpu_fast"))
+@pytest.mark.parametrize("mode", ("detailed", "gpu_fast", "fixed_table"))
 def test_evaluator_rejects_non_50k_samples(tmp_path, monkeypatch, mode):
     evaluator = _evaluator_module()
     samples = tmp_path / "samples.npy"
@@ -221,4 +221,56 @@ def test_gpu_fast_publishes_separate_preview(tmp_path, monkeypatch):
     assert payload["protocol"]["paper_report_ready"] is False
     assert payload["metrics"]["Few_FID"] == 3.0
     assert json.loads(args.output.read_text(encoding="utf-8")) == payload
+    assert args.per_class_output.exists()
+
+
+def test_fixed_table_computes_only_metrics_used_by_the_table(tmp_path, monkeypatch):
+    evaluator = _evaluator_module()
+    args = _args(tmp_path, mode="fixed_table")
+    args.per_class_output = tmp_path / "fixed_per_class.json"
+    args.metrics_root.mkdir()
+    np.save(args.metrics_root / "cifar100_vgg16_fc2.npy", np.zeros((2, 4)))
+    np.save(args.metrics_root / "cifar100_vgg16_fc2_k3_radii.npy", np.zeros(2))
+    monkeypatch.setattr(
+        evaluator,
+        "_collect_fixed_table_metrics",
+        lambda *_: ({"FID": 9.0}, np.zeros((2, 4)), np.zeros((2, 4))),
+    )
+    monkeypatch.setattr(
+        evaluator,
+        "improved_prd_vgg16_k3",
+        lambda *_args, **_kwargs: (0.7, 0.8),
+    )
+    monkeypatch.setattr(
+        evaluator,
+        "_per_class_payload",
+        lambda *_: {
+            "groups": {
+                "Many": {"FID": 1.0},
+                "Medium": {"FID": 2.0},
+                "Few": {"FID": 3.0},
+            }
+        },
+    )
+
+    payload = evaluator._evaluate(
+        args,
+        images=np.zeros((2, 3, 32, 32)),
+        labels=np.zeros(2, dtype=np.int64),
+        counts=np.zeros(100, dtype=np.int64),
+    )
+
+    assert payload["metrics"] == {
+        "FID": 9.0,
+        "ImprovedPrecision": 0.7,
+        "Recall": 0.8,
+    }
+    assert payload["protocol"]["evaluation_mode"] == "fixed_table"
+    assert set(payload["protocol"]["omitted_metrics"]) == {
+        "IS",
+        "IS_std",
+        "F_8",
+        "F_1_8",
+        "KID",
+    }
     assert args.per_class_output.exists()

@@ -273,6 +273,9 @@ def evaluate_conditions(
     config: dict[str, Any],
     output: Path,
     conditions: tuple[str, ...] = ("rho_1", "learned"),
+    *,
+    mode: str = "detailed",
+    cache_features: bool = True,
 ) -> None:
     if int(config["sampling"]["num_images"]) != 50_000:
         raise ValueError("canonical evaluator requires sampling.num_images=50000")
@@ -307,18 +310,22 @@ def evaluate_conditions(
             "--metrics-root",
             str(metrics_root),
             "--mode",
-            "detailed",
+            mode,
             "--device",
             str(config["evaluation"].get("device", "cuda")),
             "--inception-batch-size",
             str(config["evaluation"]["inception_batch_size"]),
-            "--generated-features-cache",
-            str(metrics_dir / f"{condition}.features.npz"),
             "--output",
             str(metric_output),
             "--per-class-output",
             str(per_class_output),
         ]
+        feature_cache = metrics_dir / f"{condition}.features.npz"
+        if cache_features or feature_cache.is_file():
+            command.extend([
+                "--generated-features-cache",
+                str(feature_cache),
+            ])
         print("[evaluate] " + " ".join(command), flush=True)
         subprocess.run(command, cwd=ROOT, check=True)
 
