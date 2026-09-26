@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 from torch import nn
@@ -12,6 +14,7 @@ from scaffold.core import (
 from scaffold.common import OUTPUTS_ROOT, load_frozen_score, output_directory
 from scaffold.sample import FIXED_SWEEP, fixed_sweep_conditions, write_fixed_sweep_table
 from scaffold.train import training_signature
+from scaffold.run import run_fixed_parallel
 
 
 class TinyFrozenScore(nn.Module):
@@ -149,6 +152,50 @@ def test_fixed_sweep_can_select_one_parallel_worker_condition():
     assert fixed_sweep_conditions("reduced_05") == (("reduced_05", "Reduced", 0.5),)
     with pytest.raises(ValueError, match="unknown fixed-sweep condition"):
         fixed_sweep_conditions("missing")
+
+
+def test_fixed_parallel_limits_active_workers_to_two(tmp_path, monkeypatch):
+    active = 0
+    maximum = 0
+    started = []
+
+    class FakeProcess:
+        def __init__(self, condition):
+            nonlocal active, maximum
+            self.pid = 1000 + len(started)
+            self.returncode = None
+            self.condition = condition
+            active += 1
+            maximum = max(maximum, active)
+
+        def wait(self):
+            nonlocal active
+            active -= 1
+            self.returncode = 0
+            return 0
+
+    def fake_popen(command, **_kwargs):
+        condition = command[command.index("--condition") + 1]
+        started.append(condition)
+        return FakeProcess(condition)
+
+    evaluated = []
+    monkeypatch.setattr("scaffold.run.subprocess.Popen", fake_popen)
+    monkeypatch.setattr(
+        "scaffold.run.subprocess.run",
+        lambda command, **_kwargs: evaluated.append(command),
+    )
+
+    run_fixed_parallel(
+        SimpleNamespace(device="cuda", parallel_workers=2),
+        tmp_path / "config.yaml",
+        tmp_path / "checkpoint.pt",
+        tmp_path / "sweep",
+    )
+
+    assert maximum == 2
+    assert started == [condition for condition, _label, _rho in FIXED_SWEEP]
+    assert "fixed-evaluate" in evaluated[0]
 
 
 def test_fixed_sweep_table_reads_canonical_metric_artifacts(tmp_path):

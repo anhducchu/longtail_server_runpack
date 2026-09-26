@@ -40,11 +40,16 @@ def run_fixed_parallel(
     score_checkpoint: Path,
     output: Path,
 ) -> None:
-    """Sample all five fixed conditions concurrently, then evaluate once."""
+    """Sample fixed conditions with a bounded worker queue, then evaluate once."""
     logs = output / "logs"
     logs.mkdir(parents=True, exist_ok=True)
-    workers = []
-    for condition, _label, _rho in FIXED_SWEEP:
+    pending = list(FIXED_SWEEP)
+    active = []
+    completed = []
+    worker_pids = {}
+    failures = {}
+
+    def start_worker(condition: str):
         command = [
             sys.executable,
             "-m",
@@ -68,22 +73,21 @@ def run_fixed_parallel(
             stdout=stream,
             stderr=subprocess.STDOUT,
         )
-        workers.append((condition, process, stream))
+        worker_pids[condition] = process.pid
+        atomic_json(output / "parallel_workers.json", worker_pids)
+        return condition, process, stream
 
-    atomic_json(
-        output / "parallel_workers.json",
-        {condition: process.pid for condition, process, _stream in workers},
-    )
-    failures = {}
-    for condition, process, stream in workers:
+    while pending or active:
+        while pending and len(active) < args.parallel_workers:
+            condition, _label, _rho = pending.pop(0)
+            active.append(start_worker(condition))
+        condition, process, stream = active.pop(0)
         code = process.wait()
         stream.close()
+        completed.append((condition, code))
         if code:
             failures[condition] = code
-    atomic_json(
-        output / "parallel_exit_codes.json",
-        {condition: process.returncode for condition, process, _stream in workers},
-    )
+        atomic_json(output / "parallel_exit_codes.json", dict(completed))
     if failures:
         raise RuntimeError(f"fixed-condition workers failed: {failures}")
 
@@ -235,6 +239,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--name", help="output subdirectory below scaffold/outputs")
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
+        "--parallel-workers",
+        type=int,
+        default=2,
+        help="maximum simultaneous fixed-condition workers (default: 2)",
+    )
+    parser.add_argument(
         "--condition",
         choices=tuple(condition for condition, _label, _rho in FIXED_SWEEP),
         help="single fixed-sweep row; only valid with fixed-condition",
@@ -244,6 +254,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("fixed-condition requires --condition")
     if args.command != "fixed-condition" and args.condition is not None:
         parser.error("--condition is only valid with fixed-condition")
+    if args.parallel_workers < 1:
+        parser.error("--parallel-workers must be positive")
     return args
 
 

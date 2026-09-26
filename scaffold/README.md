@@ -111,6 +111,17 @@ với cùng config, checkpoint và `--name`; mỗi process nhận một trong c�
 `pf_ode`, `reduced_025`, `reduced_05`, `standard_sde`, `increased_2`. Sau khi cả
 năm kết thúc, chạy `fixed-evaluate` một lần để evaluate tuần tự và ghép bảng.
 
+Command gọn hơn dưới đây tự xếp hàng tối đa hai condition cùng lúc (khoảng 10 GB
+trên H100 hiện tại), sau đó evaluate và ghép bảng tự động:
+
+```bash
+python -m scaffold.run fixed-parallel \
+  --parallel-workers 2 \
+  --config scaffold/config.fixed_sweep.yaml \
+  --checkpoint /absolute/path/ckpt_300000.pt \
+  --name ddpm_300k_fixed_a_sweep
+```
+
 ## Tiêu chí đọc kết quả
 
 - Primary: Few-class FID của `learned` tốt hơn `rho_1` trên paired seeds.
