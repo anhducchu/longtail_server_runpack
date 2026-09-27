@@ -94,6 +94,7 @@ def training_signature(config: dict[str, Any]) -> dict[str, Any]:
         "diffusion": config["diffusion"],
         "model": config["model"],
         "training": training,
+        "score_guidance_scale": float(config["sampling"]["guidance_scale"]),
     }
 
 
@@ -197,6 +198,7 @@ def train_scaffold(
             stride=int(training["stride"]),
             microbatch=int(config["model"]["microbatch"]),
             generator=path_generator,
+            guidance_scale=float(config["sampling"]["guidance_scale"]),
         )
         difference = (paths[0] - paths[1]).flatten(1)
         per_source = difference.square().mean(dim=1) / 2.0

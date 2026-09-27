@@ -47,6 +47,8 @@ sampling:
   batch_size: 16
   stride: 10
   seed: 20260926
+  # Matches CCUA-DDPM: eps_cond + omega * (eps_cond - eps_uncond).
+  guidance_scale: 1.5
 
 evaluation:
   enabled: false

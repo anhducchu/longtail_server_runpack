@@ -794,6 +794,20 @@ def _load_inputs(args) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         raise ValueError(
             f"CIFAR-100 protocol requires 50k arrays, got images={images.shape} labels={labels.shape}"
         )
+    minimum = float("inf")
+    maximum = float("-inf")
+    for start in range(0, len(images), 2048):
+        batch = np.asarray(images[start:start + 2048])
+        if not np.isfinite(batch).all():
+            raise ValueError("sample values must be finite and in [0, 1]; found non-finite values")
+        minimum = min(minimum, float(batch.min()))
+        maximum = max(maximum, float(batch.max()))
+    tolerance = 1e-6
+    if minimum < -tolerance or maximum > 1.0 + tolerance:
+        raise ValueError(
+            "sample values must be finite and in [0, 1]; "
+            f"observed min={minimum:.6g}, max={maximum:.6g}"
+        )
     labels_array = np.asarray(labels)
     counts = np.bincount(np.asarray(labels_array, dtype=np.int64), minlength=_NUM_CLASSES)
     expected_count = _NUM_SAMPLES // _NUM_CLASSES

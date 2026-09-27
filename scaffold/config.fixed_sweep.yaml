@@ -49,6 +49,8 @@ sampling:
   batch_size: 256
   stride: 10
   seed: 20260926
+  # Matches CCUA-DDPM's omega convention, not the alternative CFG scale form.
+  guidance_scale: 1.5
 
 evaluation:
   enabled: true

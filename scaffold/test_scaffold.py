@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 from torch import nn
@@ -9,10 +10,16 @@ from scaffold.core import (
     alpha_bar_schedule,
     effective_class_weights,
     forward_path_pair,
+    predict_epsilon,
     reverse_sample,
 )
 from scaffold.common import OUTPUTS_ROOT, load_frozen_score, output_directory
-from scaffold.sample import FIXED_SWEEP, fixed_sweep_conditions, write_fixed_sweep_table
+from scaffold.sample import (
+    FIXED_SWEEP,
+    fixed_sweep_conditions,
+    generate_condition,
+    write_fixed_sweep_table,
+)
 from scaffold.train import training_signature
 from scaffold.run import run_fixed_evaluate_parallel, run_fixed_parallel
 
@@ -53,6 +60,7 @@ def test_frozen_score_has_no_parameter_gradient_but_phi_does():
         stride=2,
         microbatch=2,
         generator=torch.Generator().manual_seed(7),
+        guidance_scale=1.5,
     )
     paths.square().mean().backward()
 
@@ -79,9 +87,115 @@ def test_paired_reverse_sampling_is_reproducible():
             microbatch=2,
             generator=torch.Generator().manual_seed(11),
             rho_override=1.0,
+            guidance_scale=1.5,
         )
 
     assert torch.equal(generate(), generate())
+
+
+def test_pf_ode_matches_vendor_ddim_update():
+    model = TinyFrozenScore().eval()
+    alpha_bar = alpha_bar_schedule(8, 1e-4, 0.02, device=torch.device("cpu"))
+    labels = torch.tensor([0, 1])
+    counts = torch.tensor([10.0, 2.0])
+    seed = 13
+    actual = reverse_sample(
+        model,
+        None,
+        labels,
+        counts,
+        alpha_bar,
+        image_size=4,
+        steps=8,
+        stride=2,
+        microbatch=2,
+        generator=torch.Generator().manual_seed(seed),
+        rho_override=0.0,
+        guidance_scale=0.0,
+    )
+
+    expected = torch.randn(
+        (2, 3, 4, 4), generator=torch.Generator().manual_seed(seed)
+    )
+    for current_step in (6, 4, 2):
+        next_step = current_step - 2
+        current_alpha = alpha_bar[current_step]
+        next_alpha = alpha_bar[next_step]
+        epsilon = expected * model.scale
+        predicted_clean = (
+            expected - (1.0 - current_alpha).sqrt() * epsilon
+        ) / current_alpha.sqrt()
+        expected = (
+            next_alpha.sqrt() * predicted_clean
+            + (1.0 - next_alpha).sqrt() * epsilon
+        )
+
+    assert torch.allclose(actual, expected, atol=1e-6)
+
+
+def test_guided_epsilon_matches_vendor_cfg_formula():
+    class ConditionalScore(nn.Module):
+        def forward(self, images, times, y=None):
+            del times
+            value = -1.0 if y is None else 1.0
+            return torch.full_like(images, value)
+
+    images = torch.zeros(2, 3, 2, 2)
+    epsilon = predict_epsilon(
+        ConditionalScore(),
+        images,
+        torch.zeros(2, dtype=torch.long),
+        torch.tensor([0, 1]),
+        microbatch=1,
+        preserve_input_gradient=False,
+        guidance_scale=1.5,
+    )
+
+    # Vendor CCUA-DDPM uses eps_cond + omega * (eps_cond - eps_uncond).
+    assert torch.equal(epsilon, torch.full_like(images, 4.0))
+
+
+def test_generated_samples_are_saved_in_evaluator_zero_one_range(tmp_path, monkeypatch):
+    raw = torch.linspace(-1.0, 1.0, 24).reshape(2, 3, 2, 2)
+
+    def fake_reverse_sample(*_args, **kwargs):
+        assert kwargs["guidance_scale"] == 1.5
+        return raw
+
+    monkeypatch.setattr("scaffold.sample.reverse_sample", fake_reverse_sample)
+    config = {
+        "dataset": {"image_size": 2},
+        "diffusion": {"steps": 8},
+        "model": {"microbatch": 2},
+        "sampling": {
+            "num_images": 2,
+            "batch_size": 2,
+            "stride": 2,
+            "seed": 7,
+            "guidance_scale": 1.5,
+        },
+    }
+
+    destination = generate_condition(
+        condition="standard_sde",
+        model=nn.Identity(),
+        scaffold=None,
+        rho_override=1.0,
+        counts=torch.tensor([1.0, 1.0]),
+        labels=np.array([0, 1]),
+        alpha_bar=torch.ones(8),
+        source_checkpoint=tmp_path / "checkpoint.pt",
+        source_sha256="abc",
+        phi_sha256=None,
+        config=config,
+        output=tmp_path,
+        device=torch.device("cpu"),
+    )
+
+    saved = np.load(destination)
+    np.testing.assert_allclose(saved, ((raw + 1.0) / 2.0).numpy())
+    assert float(saved.min()) == 0.0
+    assert float(saved.max()) == 1.0
 
 
 def test_effective_weights_are_normalized():
@@ -102,6 +216,7 @@ def test_training_signature_allows_only_longer_resume():
         "diffusion": {"steps": 1000},
         "model": {"channels": 128},
         "training": {"updates": 10, "save_every": 5, "log_every": 1, "learning_rate": 1e-3},
+        "sampling": {"guidance_scale": 1.5},
     }
     extended = {**config, "training": {**config["training"], "updates": 20}}
     changed = {**config, "training": {**config["training"], "learning_rate": 1e-4}}

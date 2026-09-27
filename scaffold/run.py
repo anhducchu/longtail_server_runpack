@@ -280,6 +280,8 @@ def show_plan(config: dict, checkpoint: Path, output: Path) -> None:
     print(f"frozen weights:   {config['model']['checkpoint_key']}")
     print(f"output:           {output}")
     print(f"updates:          {config['training']['updates']}")
+    print(f"CFG omega:        {config['sampling']['guidance_scale']}")
+    print("sample range:     [0, 1]")
     print(
         f"samples:          {config['sampling']['num_images']} "
         f"x {condition_count} paired conditions"

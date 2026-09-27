@@ -90,6 +90,7 @@ def generate_condition(
     destination.parent.mkdir(parents=True, exist_ok=True)
     provenance_path = destination.with_suffix(".provenance.json")
     provenance = {
+        "schema": "fixed_scaffold_samples_v3",
         "condition": condition,
         "rho_over_a0": rho_override,
         "source_checkpoint": str(source_checkpoint),
@@ -98,6 +99,11 @@ def generate_condition(
         "num_images": len(labels),
         "seed": int(sampling["seed"]),
         "stride": int(sampling["stride"]),
+        "guidance_scale": float(sampling["guidance_scale"]),
+        "guidance_formula": "eps_cond + omega * (eps_cond - eps_uncond)",
+        "sampler": "generalized_ddim_variance",
+        "variance_projection": "clip only when rho exceeds finite-step marginal budget",
+        "sample_value_range": "zero_one",
         "paired_noise": True,
     }
     if reusable_sample(destination, provenance_path, provenance, config):
@@ -140,8 +146,11 @@ def generate_condition(
                     microbatch=int(config["model"]["microbatch"]),
                     generator=generator,
                     rho_override=rho_override,
+                    guidance_scale=float(sampling["guidance_scale"]),
                 )
-                generated[start:stop] = images.clamp(-1.0, 1.0).cpu().numpy()
+                generated[start:stop] = (
+                    (images.clamp(-1.0, 1.0) + 1.0) / 2.0
+                ).cpu().numpy()
                 if start == 0 or stop == len(labels) or (start // batch_size) % 50 == 0:
                     print(f"[sample:{condition}] {stop}/{len(labels)}", flush=True)
         generated.flush()

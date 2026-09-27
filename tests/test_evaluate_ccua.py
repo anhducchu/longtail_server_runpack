@@ -137,6 +137,21 @@ def test_evaluator_rejects_non_50k_samples(tmp_path, monkeypatch, mode):
         evaluator.main()
 
 
+def test_evaluator_rejects_images_outside_zero_one(tmp_path, monkeypatch):
+    evaluator = _evaluator_module()
+    monkeypatch.setattr(evaluator, "_NUM_SAMPLES", 2)
+    monkeypatch.setattr(evaluator, "_NUM_CLASSES", 2)
+    samples = tmp_path / "samples.npy"
+    labels = tmp_path / "labels.npy"
+    images = np.full((2, 3, 32, 32), 0.5, dtype=np.float32)
+    images[0, 0, 0, 0] = -0.01
+    np.save(samples, images)
+    np.save(labels, np.array([0, 1], dtype=np.int64))
+
+    with pytest.raises(ValueError, match=r"sample values must be finite and in \[0, 1\]"):
+        evaluator._load_inputs(SimpleNamespace(samples=samples, labels=labels))
+
+
 def test_detailed_publishes_headline_before_vgg_and_passes_device(tmp_path, monkeypatch):
     evaluator = _evaluator_module()
     args = _args(tmp_path, mode="detailed")

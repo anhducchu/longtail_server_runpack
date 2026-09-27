@@ -18,6 +18,11 @@ So sánh bắt buộc dùng cùng checkpoint, label, seed và reverse integrator
 `rho_phi` khởi tạo chính xác tại 1. Optimizer chỉ nhận `phi`; mỗi update đều
 kiểm tra không parameter nào của score nhận gradient.
 
+Score prediction giữ đúng classifier-free guidance của checkpoint gốc:
+`eps_cond + 1.5 * (eps_cond - eps_uncond)`. Sample được lưu trong `[0,1]`,
+đúng input contract của Inception/VGG evaluator. Evaluator sẽ fail sớm nếu
+sample có NaN/Inf hoặc nằm ngoài khoảng này.
+
 ## Chạy
 
 Đặt checkpoint đã train ở bất kỳ đâu; scaffold chỉ đọc file đó. Từ repo root:
@@ -105,6 +110,14 @@ sample/metric hoàn tất được giữ nguyên. Bảng kết quả được gh
 Markdown trong output. `Class-valid` được để `N/A` nếu chưa cung cấp một frozen
 CIFAR-100 classifier độc lập; requested conditioning label không được coi là
 bằng chứng ảnh đúng lớp.
+
+Fixed sweep dùng generalized DDIM cho cả năm dòng. Ở mỗi bước,
+`rho=A/A0` nhân trực tiếp DDIM posterior variance: `rho=0` khớp chính
+xác update DDIM/PF-ODE gốc, còn `rho=1` khôi phục DDPM posterior variance
+khi bước kề nhau. Với accelerated grid, đây là cùng một họ solver có
+kiểm soát stochasticity. Nếu `rho>1` vượt variance budget của một
+finite terminal step, variance được project về biên hợp lệ và provenance ghi
+rõ policy này.
 
 Để chạy đồng thời năm condition trên cùng GPU, mở năm process `fixed-condition`
 với cùng config, checkpoint và `--name`; mỗi process nhận một trong các tên
