@@ -25,10 +25,10 @@ from scaffold.common import (
     sha256_file,
 )
 from scaffold.sample import (
-    FIXED_SWEEP,
     evaluate_conditions,
     sample_conditions,
     sample_fixed_sweep,
+    sweep_conditions,
     write_fixed_sweep_table,
 )
 from scaffold.train import train_scaffold
@@ -39,11 +39,12 @@ def run_fixed_parallel(
     config_path: Path,
     score_checkpoint: Path,
     output: Path,
+    config: dict,
 ) -> None:
     """Sample fixed conditions with a bounded worker queue, then evaluate once."""
     logs = output / "logs"
     logs.mkdir(parents=True, exist_ok=True)
-    pending = list(FIXED_SWEEP)
+    pending = list(sweep_conditions(config))
     active = []
     completed = []
     worker_pids = {}
@@ -79,7 +80,7 @@ def run_fixed_parallel(
 
     while pending or active:
         while pending and len(active) < args.parallel_workers:
-            condition, _label, _rho = pending.pop(0)
+            condition = pending.pop(0)["name"]
             active.append(start_worker(condition))
         condition, process, stream = active.pop(0)
         code = process.wait()
@@ -120,11 +121,12 @@ def run_fixed_evaluate_parallel(
     config_path: Path,
     score_checkpoint: Path,
     output: Path,
+    config: dict,
 ) -> Path:
     """Evaluate fixed conditions with the same bounded worker queue."""
     logs = output / "logs"
     logs.mkdir(parents=True, exist_ok=True)
-    pending = list(FIXED_SWEEP)
+    pending = list(sweep_conditions(config))
     active = []
     completed = []
     worker_pids = {}
@@ -158,7 +160,7 @@ def run_fixed_evaluate_parallel(
 
     while pending or active:
         while pending and len(active) < args.parallel_workers:
-            condition, _label, _rho = pending.pop(0)
+            condition = pending.pop(0)["name"]
             active.append(start_worker(condition))
         condition, process, stream = active.pop(0)
         code = process.wait()
@@ -169,7 +171,7 @@ def run_fixed_evaluate_parallel(
         atomic_json(output / "evaluate_exit_codes.json", dict(completed))
     if failures:
         raise RuntimeError(f"fixed-evaluate workers failed: {failures}")
-    return write_fixed_sweep_table(output)
+    return write_fixed_sweep_table(output, config)
 
 
 def run(args: argparse.Namespace) -> None:
@@ -199,6 +201,7 @@ def run(args: argparse.Namespace) -> None:
         evaluate_conditions(config, output)
         return
     if args.command == "fixed-evaluate-condition":
+        sweep_conditions(config, args.condition)
         evaluate_conditions(
             config,
             output,
@@ -209,12 +212,12 @@ def run(args: argparse.Namespace) -> None:
         return
     if args.command == "fixed-evaluate":
         result = run_fixed_evaluate_parallel(
-            args, config_path, score_checkpoint, output
+            args, config_path, score_checkpoint, output, config
         )
         print(f"[result] {result}")
         return
     if args.command == "fixed-parallel":
-        run_fixed_parallel(args, config_path, score_checkpoint, output)
+        run_fixed_parallel(args, config_path, score_checkpoint, output, config)
         return
 
     device = torch.device(args.device)
@@ -250,7 +253,7 @@ def run(args: argparse.Namespace) -> None:
             output,
             device,
         )
-        fixed_conditions = tuple(condition for condition, _label, _rho in FIXED_SWEEP)
+        fixed_conditions = tuple(row["name"] for row in sweep_conditions(config))
         evaluate_conditions(
             config,
             output,
@@ -258,7 +261,7 @@ def run(args: argparse.Namespace) -> None:
             mode="fixed_table",
             cache_features=False,
         )
-        result = write_fixed_sweep_table(output)
+        result = write_fixed_sweep_table(output, config)
         print(f"[result] {result}")
     if args.command == "fixed-condition":
         sample_fixed_sweep(
@@ -275,7 +278,11 @@ def run(args: argparse.Namespace) -> None:
 
 
 def show_plan(config: dict, checkpoint: Path, output: Path) -> None:
-    condition_count = 5 if config["experiment"].get("kind") == "fixed_sweep" else 2
+    condition_count = (
+        len(sweep_conditions(config))
+        if config["experiment"].get("kind") == "fixed_sweep"
+        else 2
+    )
     print(f"score checkpoint: {checkpoint}")
     print(f"frozen weights:   {config['model']['checkpoint_key']}")
     print(f"output:           {output}")
@@ -323,7 +330,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--condition",
-        choices=tuple(condition for condition, _label, _rho in FIXED_SWEEP),
         help="single fixed-sweep row for sampling or evaluation",
     )
     args = parser.parse_args()

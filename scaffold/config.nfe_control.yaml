@@ -1,0 +1,66 @@
+# Numerical control for the frozen DDPM score. Grid-100 rows are reused from
+# config.fixed_sweep.yaml; this file runs only the six missing rows.
+experiment:
+  name: ddpm_300k_nfe_control
+  kind: fixed_sweep
+  seed: 20260925
+  conditions:
+    - {name: grid50_rho0, label: "PF-ODE", rho: 0.0, stride: 20}
+    - {name: grid50_rho05, label: "rho=0.5", rho: 0.5, stride: 20}
+    - {name: grid50_rho1, label: "rho=1", rho: 1.0, stride: 20}
+    - {name: grid250_rho0, label: "PF-ODE", rho: 0.0, stride: 4}
+    - {name: grid250_rho05, label: "rho=0.5", rho: 0.5, stride: 4}
+    - {name: grid250_rho1, label: "rho=1", rho: 1.0, stride: 4}
+
+dataset:
+  root: "${LTX_DATA_ROOT:-data}"
+  imbalance_factor: 0.01
+  split_seed: 0
+  num_classes: 100
+  image_size: 32
+
+diffusion:
+  steps: 1000
+  beta_1: 0.0001
+  beta_T: 0.02
+
+model:
+  checkpoint_key: ema_model
+  channels: 128
+  channel_multipliers: [1, 2, 2, 2]
+  attention_levels: [1]
+  residual_blocks: 2
+  dropout: 0.1
+  microbatch: 256
+
+# Required by the shared scaffold schema; this study does not train phi.
+training:
+  updates: 0
+  batch_size: 1
+  stride: 50
+  hidden_width: 32
+  learning_rate: 0.001
+  rarity_weight_exponent: 1.0
+  rho_min: 0.05
+  rho_max: 2.0
+  budget_weight: 2.0
+  prior_weight: 0.1
+  budget_time_samples: 32
+  prior_projections: 32
+  gradient_clip: 1.0
+  save_every: 10
+  log_every: 5
+
+sampling:
+  num_images: 50000
+  batch_size: 256
+  # Per-condition strides above override this schema default.
+  stride: 10
+  seed: 20260926
+  guidance_scale: 1.5
+
+evaluation:
+  enabled: true
+  metrics_root: "${LTX_METRICS_ROOT:-third_party/CCUA-DDPM/stats}"
+  device: cuda
+  inception_batch_size: 128

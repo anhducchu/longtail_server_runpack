@@ -18,6 +18,7 @@ from scaffold.sample import (
     FIXED_SWEEP,
     fixed_sweep_conditions,
     generate_condition,
+    sweep_conditions,
     write_fixed_sweep_table,
 )
 from scaffold.train import training_signature
@@ -131,6 +132,34 @@ def test_pf_ode_matches_vendor_ddim_update():
         )
 
     assert torch.allclose(actual, expected, atol=1e-6)
+
+
+def test_time_window_sets_rho_zero_outside_selected_steps():
+    model = TinyFrozenScore().eval()
+    alpha_bar = alpha_bar_schedule(8, 1e-4, 0.02, device=torch.device("cpu"))
+    labels = torch.tensor([0, 1])
+    counts = torch.tensor([10.0, 2.0])
+
+    def generate(rho, window=None):
+        return reverse_sample(
+            model,
+            None,
+            labels,
+            counts,
+            alpha_bar,
+            image_size=4,
+            steps=8,
+            stride=2,
+            microbatch=2,
+            generator=torch.Generator().manual_seed(17),
+            rho_override=rho,
+            rho_window=window,
+            guidance_scale=0.0,
+        )
+
+    pf_ode = generate(0.0)
+    assert torch.equal(generate(1.0, (0.0, 0.1)), pf_ode)
+    assert not torch.equal(generate(1.0, (0.0, 1.0)), pf_ode)
 
 
 def test_guided_epsilon_matches_vendor_cfg_formula():
@@ -269,6 +298,58 @@ def test_fixed_sweep_can_select_one_parallel_worker_condition():
         fixed_sweep_conditions("missing")
 
 
+def test_configured_sweep_supports_grid_and_time_window():
+    config = {
+        "experiment": {
+            "conditions": [
+                {"name": "grid50_rho05", "label": "rho=.5", "rho": 0.5, "stride": 20},
+                {
+                    "name": "late_rho05",
+                    "label": "late",
+                    "rho": 0.5,
+                    "time_window": [0.0, 0.25],
+                },
+            ]
+        },
+        "diffusion": {"steps": 1000},
+        "sampling": {"stride": 10},
+    }
+
+    conditions = sweep_conditions(config)
+
+    assert conditions[0]["grid_points"] == 50
+    assert conditions[0]["stride"] == 20
+    assert conditions[1]["grid_points"] == 100
+    assert conditions[1]["time_window"] == (0.0, 0.25)
+    assert sweep_conditions(config, "late_rho05") == (conditions[1],)
+
+
+def test_configured_sweep_rejects_overlapping_or_invalid_metadata():
+    base = {"diffusion": {"steps": 1000}, "sampling": {"stride": 10}}
+    duplicate = {
+        **base,
+        "experiment": {
+            "conditions": [
+                {"name": "same", "label": "a", "rho": 0.0},
+                {"name": "same", "label": "b", "rho": 1.0},
+            ]
+        },
+    }
+    invalid_window = {
+        **base,
+        "experiment": {
+            "conditions": [
+                {"name": "bad", "label": "bad", "rho": 0.5, "time_window": [0.75, 0.5]}
+            ]
+        },
+    }
+
+    with pytest.raises(ValueError, match="condition names must be unique"):
+        sweep_conditions(duplicate)
+    with pytest.raises(ValueError, match="time_window"):
+        sweep_conditions(invalid_window)
+
+
 def test_fixed_parallel_limits_active_workers_to_two(tmp_path, monkeypatch):
     active = 0
     maximum = 0
@@ -306,6 +387,11 @@ def test_fixed_parallel_limits_active_workers_to_two(tmp_path, monkeypatch):
         tmp_path / "config.yaml",
         tmp_path / "checkpoint.pt",
         tmp_path / "sweep",
+        {
+            "experiment": {},
+            "diffusion": {"steps": 1000},
+            "sampling": {"stride": 10},
+        },
     )
 
     assert maximum == 2
@@ -337,7 +423,7 @@ def test_fixed_evaluation_limits_active_workers_to_two(tmp_path, monkeypatch):
     monkeypatch.setattr("scaffold.run.subprocess.Popen", fake_popen)
     monkeypatch.setattr(
         "scaffold.run.write_fixed_sweep_table",
-        lambda output: output / "fixed_sweep_results.md",
+        lambda output, _config: output / "fixed_sweep_results.md",
     )
 
     result = run_fixed_evaluate_parallel(
@@ -345,6 +431,11 @@ def test_fixed_evaluation_limits_active_workers_to_two(tmp_path, monkeypatch):
         tmp_path / "config.yaml",
         tmp_path / "checkpoint.pt",
         tmp_path / "sweep",
+        {
+            "experiment": {},
+            "diffusion": {"steps": 1000},
+            "sampling": {"stride": 10},
+        },
     )
 
     assert maximum == 2
@@ -365,7 +456,45 @@ def test_fixed_sweep_table_reads_canonical_metric_artifacts(tmp_path):
             encoding="utf-8",
         )
 
-    table = write_fixed_sweep_table(tmp_path)
+    table = write_fixed_sweep_table(
+        tmp_path,
+        {
+            "experiment": {},
+            "diffusion": {"steps": 1000},
+            "sampling": {"stride": 10},
+        },
+    )
 
     assert "Standard SDE" in table.read_text(encoding="utf-8")
     assert "N/A" in table.read_text(encoding="utf-8")
+
+
+def test_custom_sweep_table_reports_grid_and_window(tmp_path):
+    config = {
+        "experiment": {
+            "conditions": [
+                {
+                    "name": "early_rho05",
+                    "label": "early",
+                    "rho": 0.5,
+                    "stride": 20,
+                    "time_window": [0.75, 1.0],
+                }
+            ]
+        },
+        "diffusion": {"steps": 1000},
+        "sampling": {"stride": 10},
+    }
+    metrics = tmp_path / "metrics"
+    metrics.mkdir()
+    (metrics / "early_rho05.json").write_text(
+        '{"metrics": {"FID": 10, "Recall": 0.5}}', encoding="utf-8"
+    )
+    (metrics / "early_rho05.per_class.json").write_text(
+        '{"groups": {"Many": {"FID": 1}, "Medium": {"FID": 2}, "Few": {"FID": 3}}}',
+        encoding="utf-8",
+    )
+
+    table = write_fixed_sweep_table(tmp_path, config).read_text(encoding="utf-8")
+
+    assert "| early | 50 | [0.75,1) | 0.5 |" in table

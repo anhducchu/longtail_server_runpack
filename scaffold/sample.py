@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import os
 import subprocess
 import sys
@@ -16,6 +17,7 @@ import torch
 
 from scaffold.common import (
     ROOT,
+    SAFE_NAME,
     VENDOR_ROOT,
     atomic_json,
     atomic_numpy,
@@ -46,6 +48,65 @@ def fixed_sweep_conditions(
     if not selected:
         valid = ", ".join(row[0] for row in FIXED_SWEEP)
         raise ValueError(f"unknown fixed-sweep condition {condition!r}; choose from {valid}")
+    return selected
+
+
+def sweep_conditions(
+    config: dict[str, Any], condition: str | None = None
+) -> tuple[dict[str, Any], ...]:
+    """Return validated sweep rows, with the legacy five-row sweep as default."""
+    configured = config["experiment"].get("conditions")
+    if configured is None:
+        configured = [
+            {"name": name, "label": label, "rho": rho}
+            for name, label, rho in FIXED_SWEEP
+        ]
+    if not isinstance(configured, list) or not configured:
+        raise ValueError("experiment.conditions must be a non-empty list")
+
+    steps = int(config["diffusion"]["steps"])
+    default_stride = int(config["sampling"]["stride"])
+    rows = []
+    for raw in configured:
+        if not isinstance(raw, dict):
+            raise ValueError("each experiment condition must be a mapping")
+        name = str(raw.get("name", ""))
+        if not SAFE_NAME.fullmatch(name):
+            raise ValueError(f"invalid condition name: {name!r}")
+        label = str(raw.get("label", name))
+        rho = float(raw["rho"])
+        if not math.isfinite(rho) or rho < 0.0:
+            raise ValueError(f"condition {name}: rho must be finite and non-negative")
+        stride = int(raw.get("stride", default_stride))
+        if stride < 1 or steps % stride:
+            raise ValueError(f"condition {name}: stride must divide diffusion.steps")
+        window_value = raw.get("time_window")
+        window = None
+        if window_value is not None:
+            if not isinstance(window_value, list) or len(window_value) != 2:
+                raise ValueError(f"condition {name}: time_window must be [lower, upper]")
+            window = (float(window_value[0]), float(window_value[1]))
+            if not 0.0 <= window[0] < window[1] <= 1.0:
+                raise ValueError(
+                    f"condition {name}: time_window must satisfy 0 <= lower < upper <= 1"
+                )
+        rows.append({
+            "name": name,
+            "label": label,
+            "rho": rho,
+            "stride": stride,
+            "grid_points": steps // stride,
+            "time_window": window,
+        })
+
+    names = [row["name"] for row in rows]
+    if len(names) != len(set(names)):
+        raise ValueError("condition names must be unique")
+    if condition is None:
+        return tuple(rows)
+    selected = tuple(row for row in rows if row["name"] == condition)
+    if not selected:
+        raise ValueError(f"unknown sweep condition {condition!r}; choose from {', '.join(names)}")
     return selected
 
 
@@ -84,8 +145,11 @@ def generate_condition(
     config: dict[str, Any],
     output: Path,
     device: torch.device,
+    stride: int | None = None,
+    rho_window: tuple[float, float] | None = None,
 ) -> Path:
     sampling = config["sampling"]
+    condition_stride = int(stride or sampling["stride"])
     destination = sample_path(output, condition)
     destination.parent.mkdir(parents=True, exist_ok=True)
     provenance_path = destination.with_suffix(".provenance.json")
@@ -98,7 +162,7 @@ def generate_condition(
         "phi_sha256": phi_sha256,
         "num_images": len(labels),
         "seed": int(sampling["seed"]),
-        "stride": int(sampling["stride"]),
+        "stride": condition_stride,
         "guidance_scale": float(sampling["guidance_scale"]),
         "guidance_formula": "eps_cond + omega * (eps_cond - eps_uncond)",
         "sampler": "generalized_ddim_variance",
@@ -106,6 +170,8 @@ def generate_condition(
         "sample_value_range": "zero_one",
         "paired_noise": True,
     }
+    if rho_window is not None:
+        provenance["time_window"] = list(rho_window)
     if reusable_sample(destination, provenance_path, provenance, config):
         print(f"[sample:{condition}] keeping {destination}")
         return destination
@@ -142,10 +208,11 @@ def generate_condition(
                     alpha_bar,
                     image_size=int(config["dataset"]["image_size"]),
                     steps=int(config["diffusion"]["steps"]),
-                    stride=int(sampling["stride"]),
+                    stride=condition_stride,
                     microbatch=int(config["model"]["microbatch"]),
                     generator=generator,
                     rho_override=rho_override,
+                    rho_window=rho_window,
                     guidance_scale=float(sampling["guidance_scale"]),
                 )
                 generated[start:stop] = (
@@ -260,12 +327,12 @@ def sample_fixed_sweep(
         float(diffusion["beta_T"]),
         device=device,
     )
-    for condition_name, _label, rho in fixed_sweep_conditions(condition):
+    for row in sweep_conditions(config, condition):
         generate_condition(
-            condition=condition_name,
+            condition=row["name"],
             model=model,
             scaffold=None,
-            rho_override=rho,
+            rho_override=row["rho"],
             counts=counts,
             labels=labels,
             alpha_bar=alpha_bar,
@@ -275,6 +342,8 @@ def sample_fixed_sweep(
             config=config,
             output=output,
             device=device,
+            stride=row["stride"],
+            rho_window=row["time_window"],
         )
 
 
@@ -339,17 +408,25 @@ def evaluate_conditions(
         subprocess.run(command, cwd=ROOT, check=True)
 
 
-def write_fixed_sweep_table(output: Path) -> Path:
+def write_fixed_sweep_table(output: Path, config: dict[str, Any]) -> Path:
     """Collect canonical evaluator artifacts into the requested comparison table."""
     rows = []
-    for condition, label, rho in FIXED_SWEEP:
-        metric_path = output / "metrics" / f"{condition}.json"
-        group_path = output / "metrics" / f"{condition}.per_class.json"
+    conditions = sweep_conditions(config)
+    custom = config["experiment"].get("conditions") is not None
+    for condition in conditions:
+        name = condition["name"]
+        metric_path = output / "metrics" / f"{name}.json"
+        group_path = output / "metrics" / f"{name}.per_class.json"
         metrics = json.loads(metric_path.read_text(encoding="utf-8"))["metrics"]
         groups = json.loads(group_path.read_text(encoding="utf-8"))["groups"]
-        rows.append({
-            "Scaffold": label,
-            "A/A0": rho,
+        row = {
+            "Condition": condition["label"],
+            "Grid": condition["grid_points"],
+            "Window": (
+                "global" if condition["time_window"] is None
+                else f"[{condition['time_window'][0]:g},{condition['time_window'][1]:g})"
+            ),
+            "A/A0": condition["rho"],
             "Train thêm?": "No",
             "Overall FID": float(metrics["FID"]),
             "Many": float(groups["Many"]["FID"]),
@@ -357,7 +434,12 @@ def write_fixed_sweep_table(output: Path) -> Path:
             "Few": float(groups["Few"]["FID"]),
             "Recall": float(metrics["Recall"]),
             "Class-valid": None,
-        })
+        }
+        if not custom:
+            row.pop("Grid")
+            row.pop("Window")
+            row["Scaffold"] = row.pop("Condition")
+        rows.append(row)
 
     json_path = output / "fixed_sweep_results.json"
     atomic_json(json_path, {
@@ -371,17 +453,30 @@ def write_fixed_sweep_table(output: Path) -> Path:
         writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
-    lines = [
-        "| Scaffold | A/A0 | Train thêm? | Overall FID ↓ | Many ↓ | Medium ↓ | Few ↓ | Recall ↑ | Class-valid ↑ |",
-        "|---|---:|:---:|---:|---:|---:|---:|---:|---:|",
-    ]
+    if custom:
+        lines = [
+            "| Condition | Grid | Window | A/A0 | Overall FID ↓ | Many ↓ | Medium ↓ | Few ↓ | Recall ↑ |",
+            "|---|---:|---|---:|---:|---:|---:|---:|---:|",
+        ]
+    else:
+        lines = [
+            "| Scaffold | A/A0 | Train thêm? | Overall FID ↓ | Many ↓ | Medium ↓ | Few ↓ | Recall ↑ | Class-valid ↑ |",
+            "|---|---:|:---:|---:|---:|---:|---:|---:|---:|",
+        ]
     for row in rows:
-        lines.append(
-            f"| {row['Scaffold']} | {row['A/A0']:g} | No | "
-            f"{row['Overall FID']:.4f} | {row['Many']:.4f} | "
-            f"{row['Medium']:.4f} | {row['Few']:.4f} | "
-            f"{row['Recall']:.4f} | N/A |"
-        )
+        if custom:
+            lines.append(
+                f"| {row['Condition']} | {row['Grid']} | {row['Window']} | "
+                f"{row['A/A0']:g} | {row['Overall FID']:.4f} | {row['Many']:.4f} | "
+                f"{row['Medium']:.4f} | {row['Few']:.4f} | {row['Recall']:.4f} |"
+            )
+        else:
+            lines.append(
+                f"| {row['Scaffold']} | {row['A/A0']:g} | No | "
+                f"{row['Overall FID']:.4f} | {row['Many']:.4f} | "
+                f"{row['Medium']:.4f} | {row['Few']:.4f} | "
+                f"{row['Recall']:.4f} | N/A |"
+            )
     markdown_path = output / "fixed_sweep_results.md"
     markdown_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return markdown_path

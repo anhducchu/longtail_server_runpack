@@ -197,6 +197,7 @@ def reverse_sample(
     microbatch: int,
     generator: torch.Generator,
     rho_override: float | None = None,
+    rho_window: tuple[float, float] | None = None,
     guidance_scale: float = 0.0,
 ) -> torch.Tensor:
     """Sample the generalized DDIM family with variance ratio ``rho``.
@@ -210,6 +211,12 @@ def reverse_sample(
     """
     if scaffold is None and rho_override is None:
         raise ValueError("provide scaffold or rho_override")
+    if rho_window is not None:
+        lower, upper = rho_window
+        if not 0.0 <= lower < upper <= 1.0:
+            raise ValueError("rho_window must satisfy 0 <= lower < upper <= 1")
+        if rho_override is None:
+            raise ValueError("rho_window requires a fixed rho_override")
     images = torch.randn(
         (len(labels), 3, image_size, image_size),
         device=labels.device,
@@ -231,6 +238,10 @@ def reverse_sample(
             rho = scaffold(time, log_counts).to(images.dtype)
         else:
             rho = torch.full_like(time, float(rho_override))
+        if rho_window is not None:
+            lower, upper = rho_window
+            active = (time >= lower) & (time < upper)
+            rho = torch.where(active, rho, torch.zeros_like(rho))
         rho = rho.view(-1, 1, 1, 1)
         model_time = torch.full(
             (len(images),), current_step, dtype=torch.long, device=images.device

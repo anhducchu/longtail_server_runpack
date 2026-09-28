@@ -138,6 +138,24 @@ python -m scaffold.run fixed-parallel \
   --name ddpm_300k_fixed_a_sweep
 ```
 
+## Numerical control và time-window gate
+
+`config.nfe_control.yaml` chạy sáu row còn thiếu cho grid 50/250 với
+`rho={0,0.5,1}`. Ba row grid-100 được tái sử dụng từ fixed sweep,
+không sinh lại:
+
+```bash
+python -m scaffold.run fixed-parallel --parallel-workers 2 \
+  --config scaffold/config.nfe_control.yaml \
+  --checkpoint /absolute/path/ckpt_300000.pt \
+  --name ddpm_300k_nfe_control
+```
+
+Chỉ khi NFE control vẫn cho thấy global stochasticity xấu hơn PF-ODE,
+`config.time_windows_rho05.yaml` screen bốn quarter-time window tại `rho=0.5`.
+Ngoài window, sampler đặt `rho=0` chính xác. Condition tùy chỉnh nằm
+trong `experiment.conditions`; không cần thêm script hoặc hard-code tên condition.
+
 ## Tiêu chí đọc kết quả
 
 - Primary: Few-class FID của `learned` tốt hơn `rho_1` trên paired seeds.
