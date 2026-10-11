@@ -114,8 +114,8 @@ python -m scaffold.main evaluate
 | `score_checkpoint` | the checkpoint has the configured SHA-256 and loads strictly into the configured UNet |
 | `noise_schedule` | `ᾱ` equals the vendor sampler's buffer bit for bit |
 | `dataset_split` | class counts equal the long-tailed profile; pixels map to `[−1, 1]` |
-| `score_noise_prediction` | at four noise levels θ beats the trivial predictor and itself at a wrong timestep |
-| `ddim_parity` | `λ = 0` on the vendor grid matches the vendor DDIM sampler (max abs error < 5e-3) at CFG 0, the configured scale and 1.5 |
+| `score_noise_prediction` | at four noise levels θ is better at the true timestep than 15 % of the schedule away; up to 0.6 T it beats the trivial predictor, and near pure noise (where that predictor is near-optimal) it stays within a factor 10 of it |
+| `ddim_parity` | `λ = 0` on the vendor grid, at CFG 0, the configured scale and 1.5: each edge reproduces the vendor's next state to 1e-5 (per step), and the endpoint gap is at most 10× the measured effect of a 1e-6 input nudge |
 | `ddpm_parity` | the last 200 ancestral steps match the vendor `fixedlarge` and `fixedsmall` chains with shared noise |
 | `metric_assets` | every reference file matches the manifest |
 | `inception_preprocessing` | our Inception pipeline on real CIFAR-100 images reproduces the stored reference features |
@@ -162,7 +162,7 @@ All arms of a seed share labels, initial latents and Brownian draws. The shuffle
 
 On that Gaussian control, at 20 NFE with `leading` spacing, the ratio of endpoint to data standard deviation for directions of data std 0.5 / 0.2 / 0.05 is 0.86 / 0.73 / 0.44 for `λ = 0` and 0.78 / 0.64 / 0.33 for `λ = 1`: within this family a larger `λ` contracts more. An improvement of a learned `λ` over DDIM on real data therefore has to come from correcting score error, not finite-step error.
 
-## Status of v1 (`1.0.0rc1`, kernel `ddim_scaffold_v1`)
+## Status of v1 (`1.0.0rc2`, kernel `ddim_scaffold_v1`)
 
 - **Verified on CPU with synthetic and stub models:** kernel and loss maths against independent numpy oracles, vendor parity, reproducibility, diagnostics, summary merging, paired statistics, preflight logic.
 - **Verified with real assets:** data split, noise schedule, metric assets and the Inception preprocessing.

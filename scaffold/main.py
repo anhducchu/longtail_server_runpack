@@ -55,6 +55,11 @@ LOGGER = logging.getLogger(__name__)
 TRAINING_SCHEMA = 'ddim_scaffold_training_v1'
 EVALUATION_SCHEMA = 'ddim_scaffold_evaluation_v1'
 LATENT_STREAM, BROWNIAN_STREAM = 0, 1
+# Preflight tolerances; each is justified where it is used.
+STEP_TOLERANCE = 1e-5          # one edge, [-1, 1] pixel units: float32 round-off is ~1e-6, a wrong formula >= 1e-3
+ENDPOINT_AMPLIFICATION = 10.0  # endpoint gap allowed relative to the measured effect of a 1e-6 input nudge
+ENDPOINT_FLOOR = 1e-4          # absolute endpoint gap always accepted (1 / 80 of a grey level)
+NEAR_NOISE_FACTOR = 10.0       # near pure noise theta must be within this factor of the analytic predictor
 Dataset = tuple[np.ndarray, list[np.ndarray], np.ndarray]
 Panel = tuple[np.ndarray, np.ndarray]
 MetricFn = Callable[[Path, np.ndarray], dict[str, Any]]
@@ -627,6 +632,16 @@ def _vendor_diffusion() -> Any:
         sys.modules.pop('diffusion', None)
 
 
+def noise_prediction_verdict(index: int, steps: int, mse: float, wrong_timestep_mse: dict[str, float],
+                             trivial_mse: float) -> dict[str, Any]:
+    """Verdict of ``score_noise_prediction`` for one noise level; the criteria are explained there."""
+    data_regime = index <= 6 * steps // 10
+    return {'mse': mse, 'wrong_timestep_mse': wrong_timestep_mse, 'trivial_mse': trivial_mse,
+            'regime': 'data' if data_regime else 'near_noise',
+            'beats_wrong_timesteps': all(mse < value for value in wrong_timestep_mse.values()),
+            'quality_ok': mse < trivial_mse if data_regime else mse < NEAR_NOISE_FACTOR * trivial_mse}
+
+
 def preflight(config: dict[str, Any], device: torch.device, *, num_images: int = 1000, output: Path | None = None,
               score: tuple[nn.Module, str] | None = None, data: Dataset | None = None,
               metric_fn: MetricFn | None = None) -> tuple[Path, bool]:
@@ -697,39 +712,83 @@ def preflight(config: dict[str, Any], device: torch.device, *, num_images: int =
     def score_noise_prediction() -> dict[str, Any]:
         """Timestep convention end to end: index i is the noise level alpha_bar[i].
 
-        theta must beat both the trivial predictor (exact for N(0, I) data) and itself when told a
-        timestep 15 % of the schedule away.
+        Two questions per noise level, each against a reference that is meaningful there:
+          * convention: theta told the true index must beat theta told an index 15 % of the schedule
+            away, in every direction that stays inside the schedule;
+          * quality: where the data matter (index <= 0.6 T) theta must beat the trivial predictor
+            eps = sqrt(1 - ab) x_t, which is exact only for N(0, I) data. Close to pure noise that
+            predictor is itself near-optimal (its error is O(ab)), so a network cannot be asked to beat
+            it; there theta must stay within NEAR_NOISE_FACTOR of it. A wrong timestep convention
+            misses this by orders of magnitude.
+        This check sees offsets of roughly 10 % of the schedule or more. Off-by-one conventions are
+        caught by the parity checks against the vendor samplers, not here.
         """
         x0, labels = panel(32)
         epsilon, rows = epsilon_at(0.0), {}
         steps = len(schedule)
+        shift = 3 * steps // 20
         for index in (steps // 20, 3 * steps // 10, 6 * steps // 10, 19 * steps // 20):
             alpha = schedule.alpha_bar_at(torch.full_like(labels, index), x0)
             noise = torch.randn(x0.shape, device=device, generator=torch.Generator(device).manual_seed(index))
             x_t = forward_sample(x0, alpha, noise)
-            error = float((epsilon(x_t, torch.full_like(labels, index), labels) - noise).square().mean())
+
+            def mse(told: int) -> float:
+                return float((epsilon(x_t, torch.full_like(labels, told), labels) - noise).square().mean())
+
+            error = mse(index)
+            wrong = {str(told): mse(told) for told in (index - shift, index + shift) if 0 <= told < steps}
             trivial = float((x_t * (1 - alpha).sqrt() - noise).square().mean())
-            shifted = float((epsilon(x_t, torch.full_like(labels, (index + 3 * steps // 20) % steps), labels) - noise).square().mean())
-            rows[str(index)] = {'mse': error, 'trivial_mse': trivial, 'wrong_timestep_mse': shifted}
-        return {'passed': all(row['mse'] < min(row['trivial_mse'], row['wrong_timestep_mse']) for row in rows.values()),
-                'timesteps': rows}
+            rows[str(index)] = noise_prediction_verdict(index, steps, error, wrong, trivial)
+        return {'passed': all(row['beats_wrong_timesteps'] and row['quality_ok'] for row in rows.values()),
+                'near_noise_factor': NEAR_NOISE_FACTOR, 'timesteps': rows}
 
     def ddim_parity() -> dict[str, Any]:
-        """lambda = 0 on the vendor stride-10 grid against the vendor DDIM sampler, same initial noise."""
+        """lambda = 0 on the vendor stride-10 grid against the vendor DDIM sampler.
+
+        Primary criterion, per step: fed the vendor's own states, each of our edges must reproduce the
+        vendor's next state to STEP_TOLERANCE. This isolates the update formula from the dynamics.
+
+        Secondary criterion, endpoint: two float32 implementations of the same formula differ by
+        round-off at every step, and a guided chain amplifies such perturbations. The amplification
+        is measured here, not assumed: our own endpoint is recomputed from an initial state nudged
+        by 1e-6. The vendor-vs-ours endpoint gap must not exceed ENDPOINT_AMPLIFICATION times that
+        sensitivity (one round-off-sized kick per step over ~100 steps), with an absolute floor.
+        """
         _, labels = panel()
         initial = torch.randn((len(labels), 3, int(config['dataset']['image_size']), int(config['dataset']['image_size'])),
                               device=device, generator=torch.Generator(device).manual_seed(0))
-        errors = {}
+        nudge = 1e-6 * torch.randn(initial.shape, device=device, generator=torch.Generator(device).manual_seed(5))
+        grid = stride_grid(len(schedule), 10)
+        kernel = ScaffoldKernel(schedule, FixedScaffold(0.0))
+        rows = {}
         for scale in sorted({0.0, guidance, 1.5}):
             reference = _vendor_diffusion().GaussianDiffusionSamplerDDIM(
                 need('model', 'score_checkpoint'), diffusion['beta_1'], diffusion['beta_T'], diffusion['steps'],
                 omega=scale, cond=True).to(device)
+            epsilon = epsilon_at(scale)
+            step_error, state = 0.0, initial.clone()
             with torch.no_grad():
+                for current, following in zip(grid, grid[1:]):
+                    t, s = torch.full_like(labels, current), torch.full_like(labels, following)
+                    reference.omega_t = scale
+                    expected_next = reference.p_mean_variance(x_t=state, t=t, y=labels, method='ddim', skip=10)[0]
+                    step_error = max(step_error, float((kernel(state, epsilon(state, t, labels), t, s, labels).mean
+                                                        - expected_next).abs().max()))
+                    state = expected_next
                 expected = reference(initial, labels, method='ddim', skip=10)
-            ours = sample(epsilon_at(scale), ScaffoldKernel(schedule, FixedScaffold(0.0)), labels, initial,
-                          stride_grid(len(schedule), 10), generator=torch.Generator(device).manual_seed(1))
-            errors[str(scale)] = float((ours.clamp(-1, 1) - expected).abs().max())
-        return {'passed': max(errors.values()) < tolerance, 'max_abs_error_by_guidance': errors, 'tolerance': tolerance}
+
+            def run(start: torch.Tensor) -> torch.Tensor:
+                return sample(epsilon, kernel, labels, start, grid, generator=torch.Generator(device).manual_seed(1)).clamp(-1, 1)
+
+            ours = run(initial)
+            endpoint = float((ours - expected).abs().max())
+            sensitivity = float((ours - run(initial + nudge)).abs().max())
+            allowed = max(ENDPOINT_FLOOR, ENDPOINT_AMPLIFICATION * sensitivity)
+            rows[str(scale)] = {'max_step_error': step_error, 'endpoint_error': endpoint,
+                                'endpoint_sensitivity_to_1e-6_nudge': sensitivity, 'endpoint_allowed': allowed,
+                                'step_ok': step_error < STEP_TOLERANCE, 'endpoint_ok': endpoint <= allowed}
+        return {'passed': all(row['step_ok'] and row['endpoint_ok'] for row in rows.values()),
+                'step_tolerance': STEP_TOLERANCE, 'by_guidance': rows}
 
     def ddpm_parity() -> dict[str, Any]:
         """Last 200 ancestral steps against the vendor mean / variance, same start and noise."""

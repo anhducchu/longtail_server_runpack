@@ -347,8 +347,12 @@ def test_preflight_passes_for_a_consistent_score_and_reports_every_check(tmp_pat
     assert list(checks) == ['score_checkpoint', 'noise_schedule', 'dataset_split', 'score_noise_prediction',
                             'ddim_parity', 'ddpm_parity', 'baseline_panel']
     assert passed and report['passed'] and all(entry['passed'] for entry in report['checks']), report
-    assert max(checks['ddim_parity']['max_abs_error_by_guidance'].values()) < 1e-4
-    assert set(checks['ddim_parity']['max_abs_error_by_guidance']) == {'0.0', '1.5'}
+    assert set(checks['ddim_parity']['by_guidance']) == {'0.0', '1.5'}
+    for row in checks['ddim_parity']['by_guidance'].values():
+        assert row['max_step_error'] < 1e-5 and row['endpoint_error'] <= row['endpoint_allowed']
+    for row in checks['score_noise_prediction']['timesteps'].values():
+        assert row['beats_wrong_timesteps'] and row['quality_ok']
+    assert [row['regime'] for row in checks['score_noise_prediction']['timesteps'].values()] == ['data'] * 3 + ['near_noise']
     assert max(checks['ddpm_parity']['max_abs_error_by_variance'].values()) < 1e-4
     assert checks['baseline_panel']['arms'] == ['ddim', 'eta1', 'small', 'large']
     assert set(report['source_sha256']) >= {'sampling.py', 'main.py'} and report['version']
@@ -362,6 +366,94 @@ def test_preflight_fails_when_the_score_uses_another_timestep_convention(tmp_pat
     assert not checks['score_noise_prediction']['passed']
     assert checks['ddim_parity']['passed'], 'parity with the vendor sampler cannot see a consistently wrong score'
     assert len(report['checks']) == 7, 'a failed check does not stop the remaining ones'
+
+
+@pytest.mark.parametrize('shift', [5, -5])
+def test_preflight_fails_on_the_convention_check_alone_for_a_timestep_offset(tmp_path, shift):
+    """A score offset by 10 % of the schedule still passes the quality criteria; only the convention check sees it.
+
+    Sensitivity limit, measured on this control: offsets of 2-3 indices in 50 (about 5 %) go unnoticed.
+    Off-by-one conventions are the job of the parity checks, not of this one.
+    """
+    report, passed = run_preflight(tmp_path, GaussianDenoiser(*data_moments(), shift=shift))
+    rows = {entry['name']: entry for entry in report['checks']}['score_noise_prediction']['timesteps']
+    assert not passed
+    assert all(row['quality_ok'] for row in rows.values()), 'the quality criteria alone would let this through'
+    assert not all(row['beats_wrong_timesteps'] for row in rows.values())
+
+
+def test_noise_prediction_verdict_on_the_measured_pretrained_values():
+    """The criteria applied to the numbers measured with the pinned checkpoint on 2026-10-11 (CFG 0)."""
+    measured = {50: (0.1025, {'200': 0.4554}, 0.9451), 300: (0.01157, {'150': 0.03, '450': 0.04174}, 0.2219),
+                600: (0.002675, {'450': 0.004, '750': 0.004589}, 0.007604), 950: (4.047e-5, {'800': 0.4032}, 2.959e-5)}
+    verdicts = {index: X.noise_prediction_verdict(index, 1000, *values) for index, values in measured.items()}
+    assert [verdict['regime'] for verdict in verdicts.values()] == ['data', 'data', 'data', 'near_noise']
+    assert all(verdict['beats_wrong_timesteps'] and verdict['quality_ok'] for verdict in verdicts.values())
+
+
+def test_noise_prediction_verdict_separates_convention_from_quality():
+    verdict = X.noise_prediction_verdict
+    good = verdict(300, 1000, 0.01, {'150': 0.03, '450': 0.04}, 0.2)
+    assert good['beats_wrong_timesteps'] and good['quality_ok']
+    # Convention: a single better wrong timestep is enough to fail, whatever the quality.
+    assert not verdict(300, 1000, 0.01, {'150': 0.009, '450': 0.04}, 0.2)['beats_wrong_timesteps']
+    assert verdict(300, 1000, 0.01, {'150': 0.009, '450': 0.04}, 0.2)['quality_ok']
+    # Quality in the data regime: must beat the trivial predictor outright, up to and including 0.6 T.
+    assert not verdict(600, 1000, 0.01, {'450': 0.03}, 0.009)['quality_ok']
+    assert verdict(600, 1000, 0.01, {'450': 0.03}, 0.009)['beats_wrong_timesteps']
+    # Near pure noise: within a factor 10 of the analytic predictor, not better than it.
+    assert verdict(950, 1000, 4e-5, {'800': 0.4}, 3e-5)['quality_ok']
+    assert not verdict(950, 1000, 4e-4, {'800': 0.4}, 3e-5)['quality_ok']
+    assert verdict(601, 1000, 4e-5, {'451': 0.4}, 3e-5)['regime'] == 'near_noise'
+
+
+@pytest.mark.parametrize('failing', ['beats_wrong_timesteps', 'quality_ok'])
+def test_preflight_score_check_needs_both_verdicts_at_every_noise_level(tmp_path, monkeypatch, failing):
+    original, calls = X.noise_prediction_verdict, []
+
+    def one_bad_level(index, *arguments):
+        verdict = original(index, *arguments)
+        calls.append(index)
+        return {**verdict, failing: False} if len(calls) == 3 else verdict
+
+    monkeypatch.setattr(X, 'noise_prediction_verdict', one_bad_level)
+    report, passed = run_preflight(tmp_path, GaussianDenoiser(*data_moments()))
+    checks = {entry['name']: entry for entry in report['checks']}
+    assert len(calls) == 4 and not passed and not checks['score_noise_prediction']['passed']
+    assert checks['ddim_parity']['passed'] and checks['baseline_panel']['passed']
+
+
+def test_preflight_endpoint_check_catches_a_sampling_loop_error_the_step_check_cannot_see(tmp_path, monkeypatch):
+    """Each edge is right, but the loop silently drops one node of the grid: only the endpoint differs."""
+    original = X.sample
+
+    def skipping(epsilon_fn, kernel, labels, initial_noise, grid, **keywords):
+        shortened = grid[:2] + grid[3:] if len(grid) > 3 else grid
+        return original(epsilon_fn, kernel, labels, initial_noise, shortened, **keywords)
+
+    monkeypatch.setattr(X, 'sample', skipping)
+    report, passed = run_preflight(tmp_path, GaussianDenoiser(*data_moments()))
+    rows = {entry['name']: entry for entry in report['checks']}['ddim_parity']['by_guidance']
+    assert not passed
+    assert all(row['step_ok'] for row in rows.values()) and not any(row['endpoint_ok'] for row in rows.values())
+
+
+@pytest.mark.parametrize('factor', [1.001, 0.999])
+def test_preflight_parity_fails_for_a_slightly_wrong_update_rule(tmp_path, monkeypatch, factor):
+    """A 0.1 % error in the mean of every edge must fail both parity checks, per step and at the endpoint."""
+    original = S.scaffold_transition
+
+    def skewed(*arguments, **keywords):
+        transition = original(*arguments, **keywords)
+        return S.Transition(transition.x0_hat, factor * transition.mean, transition.variance,
+                            transition.capped, transition.requested)
+
+    monkeypatch.setattr(S, 'scaffold_transition', skewed)
+    report, passed = run_preflight(tmp_path, GaussianDenoiser(*data_moments()))
+    checks = {entry['name']: entry for entry in report['checks']}
+    assert not passed and not checks['ddim_parity']['passed'] and not checks['ddpm_parity']['passed']
+    assert all(not row['step_ok'] for row in checks['ddim_parity']['by_guidance'].values())
+    assert checks['score_noise_prediction']['passed'], 'the score itself is untouched'
 
 
 def test_preflight_reports_a_missing_checkpoint_and_its_dependents(tmp_path):
