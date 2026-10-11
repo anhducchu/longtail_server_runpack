@@ -487,3 +487,21 @@ def test_classifier_accuracy_overall_and_per_group(tmp_path):
     assert accuracy == {'Overall': pytest.approx(0.66), 'Many': 1.0, 'Medium': 1.0, 'Few': 0.0}
     with pytest.raises(RuntimeError, match='SHA mismatch'):
         M.classifier_accuracy(images, labels, {**settings, 'sha256': 'wrong'}, CPU)
+
+
+# Quadratic timestep grid (DDIM reference code)
+
+@pytest.mark.parametrize('nfe', [10, 20, 50, 100])
+def test_quadratic_grid_follows_the_ddim_reference_selection(nfe):
+    reference = [int(value) for value in list(np.linspace(0, np.sqrt(1000 * 0.8), nfe) ** 2)]  # DDIM runners/diffusion.py
+    grid = S.respaced_grid(1000, nfe, spacing='quadratic')
+    assert grid[-1] == CLEAN and len(grid) == nfe + 1, 'exactly K evaluations of theta'
+    nodes = list(grid[:-1])[::-1]
+    assert all(b > a for a, b in zip(nodes, nodes[1:])) and nodes[0] == 0 and nodes[-1] in (799, 800)
+    collisions = len(reference) - len(set(reference))
+    if collisions == 0:
+        assert nodes == reference
+    else:
+        # Colliding indices are pushed up by one each; the shift never exceeds the number of collisions.
+        assert all(0 <= a - b <= collisions for a, b in zip(nodes, reference))
+    assert S.build_grid(1000, {'nfe': nfe, 'spacing': 'quadratic'}) == grid

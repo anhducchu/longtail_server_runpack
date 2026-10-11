@@ -107,7 +107,11 @@ def respaced_grid(steps: int, nfe: int, *, spacing: str = 'leading') -> Grid:
     trailing: evaluations at T-1, T-1-T/K, ... The terminal edge then jumps to
               x0_hat from a much noisier index (49 for K=20), which shrinks
               low-variance directions towards the posterior mean.
-    NFE = T is the full ancestral chain T-1, ..., 0, CLEAN for either spacing.
+    quadratic: the DDIM reference code's CIFAR-10 choice, indices
+              linspace(0, sqrt(0.8 T), K)^2: dense near the data, sparse near
+              the noise, starting at 0.8 T. Indices that collide after rounding
+              (only for large K) are moved up by one so the grid keeps K NFE.
+    NFE = T is the full ancestral chain T-1, ..., 0, CLEAN for leading and trailing.
 
     On the exact-score Gaussian control the DDIM family is closer to the data
     variance with ``leading``; ancestral fixedlarge prefers ``trailing``. The
@@ -119,8 +123,13 @@ def respaced_grid(steps: int, nfe: int, *, spacing: str = 'leading') -> Grid:
         nodes = (np.arange(nfe) * (steps // nfe))[::-1]
     elif spacing == 'trailing':
         nodes = np.rint(steps - 1 - np.arange(nfe) * (steps / nfe)).astype(int)
+    elif spacing == 'quadratic':
+        nodes = (np.linspace(0, np.sqrt(0.8 * steps), nfe) ** 2).astype(int)
+        for index in range(1, nfe):
+            nodes[index] = max(nodes[index], nodes[index - 1] + 1)
+        nodes = nodes[::-1]
     else:
-        raise ValueError("spacing must be 'leading' or 'trailing'")
+        raise ValueError("spacing must be 'leading', 'trailing' or 'quadratic'")
     return validate_grid(tuple(int(node) for node in nodes) + (CLEAN,), steps)
 
 

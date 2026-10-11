@@ -76,7 +76,7 @@ A checkpoint's identity is everything except `evaluation`, so seeds, sample coun
 --set scaffold.inputs=time_class --set training.name=time_only_nfe20
 ```
 
-Grids: `{"nfe": K, "spacing": "leading"}` evaluates at `0, T/K, …` and takes `x̂0` from index 0; `"trailing"` evaluates at `T−1, T−1−T/K, …`; `{"stride": n}` reproduces the vendor DDIM grid, which stops at index 0 without a clean edge.
+Grids: `{"nfe": K, "spacing": "leading"}` evaluates at `0, T/K, …` (uniform) and takes `x̂0` from index 0; `"trailing"` evaluates at `T−1, T−1−T/K, …`; `"quadratic"` uses the DDIM reference selection `linspace(0, √(0.8T), K)²`; `{"stride": n}` reproduces the vendor DDIM grid, which stops at index 0 without a clean edge.
 
 ## Deployment
 
