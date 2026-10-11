@@ -1,173 +1,172 @@
-# Frozen-score scaffold
+# Learned scaffold on a frozen DDPM
 
-Đây là experiment stage-2 độc lập. Nó chỉ đọc checkpoint baseline và dữ liệu;
-mọi file được tạo đều nằm trong `scaffold/outputs/<name>/`. Nó không sửa
-`main.py`, `experiment.py`, config baseline hay source trong `third_party/`.
+A pretrained class-conditional DDPM `θ` (CIFAR-100-LT) stays frozen. A small network `φ` — the scaffold — learns a per-pixel variance multiplier `λ_φ(x_t, t, c)` for a finite-step sampler of the DDIM family. The question the code is built to answer: does a state-dependent `λ_φ` beat the best fixed, time-only and shuffled-state alternatives at equal NFE?
 
-## Giả thuyết
+## Method
 
-Giữ nguyên score `s_theta` từ `ema_model` và chỉ học một MLP nhỏ
-`rho_phi(y,t)` có thể phân bổ lại stochasticity cho long-tail data mà không
-đánh đổi bằng việc train thêm score network.
+One reverse edge `t → s` (`ᾱ_t < ᾱ_s`), with `ε_θ` the frozen, CFG-guided noise prediction:
 
-So sánh bắt buộc dùng cùng checkpoint, label, seed và reverse integrator:
+```
+x̂0  = (x_t − √(1−ᾱ_t) ε_θ) / √ᾱ_t
+β̃   = (1−ᾱ_s)/(1−ᾱ_t) · (1 − ᾱ_t/ᾱ_s)              respaced posterior variance
+σ²  = min(λ · β̃, (1 − 1e-4)(1 − ᾱ_s))               variance budget
+x_s = √ᾱ_s x̂0 + √(1 − ᾱ_s − σ²) ε_θ + σ z
+```
 
-- baseline: `rho=1`;
-- scaffold: `rho=rho_phi(y,t)`.
+| `λ` | Sampler |
+| --- | --- |
+| `0` | deterministic DDIM |
+| `1` | stochastic DDIM, `η = 1` (mean equals the DDPM posterior mean) |
+| `λ_φ(x_t, t, c)` | learned scaffold |
 
-`rho_phi` khởi tạo chính xác tại 1. Optimizer chỉ nhận `phi`; mỗi update đều
-kiểm tra không parameter nào của score nhận gradient.
+The terminal edge (`s` = clean, `ᾱ_s = 1`) has `β̃ = 0`: it returns `x̂0` and injects no noise.
 
-Score prediction giữ đúng classifier-free guidance của checkpoint gốc:
-`eps_cond + 1.5 * (eps_cond - eps_uncond)`. Sample được lưu trong `[0,1]`,
-đúng input contract của Inception/VGG evaluator. Evaluator sẽ fail sớm nếu
-sample có NaN/Inf hoặc nằm ngoài khoảng này.
+`φ` is trained with the variational bound of this K-step sampler. Each term is a closed-form KL between the forward posterior `q(x_s | x_t, x0)` and the sampler's own Gaussian `p_φ(x_s | x_t)`. The terminal edge is deterministic, so its reconstruction term (a discretized-Gaussian decoder around `x̂0`) is constant in `φ`; it is reported, not trained.
 
-## Chạy
+### What this sampler is, and is not
 
-Đặt checkpoint đã train ở bất kỳ đâu; scaffold chỉ đọc file đó. Từ repo root:
+| | Learned stochastic DDIM (this code) | Marginal-preserving SDE |
+| --- | --- | --- |
+| Object | a K-step Markov chain; each edge is the Gaussian above | a continuous-time reverse SDE with diffusion `A_φ A_φᵀ` |
+| Role of `λ_φ` | variance of one finite edge, with the mean adjusted DDIM-style | diffusion coefficient; needs the drift correction `½ ∇·(A Aᵀ)` when it depends on `x` |
+| Marginals | preserved only for constant `λ` and an exact score, and then only as K → ∞ | preserved in continuous time for any admissible `A_φ` and an exact score |
+| Status here | implemented, tested, frozen as `ddim_scaffold_v1` | not implemented |
+
+`A_φ(x, t, c)` is diagonal: `A_φ = diag(√(λ_φ β̃))`. Because `λ_φ` enters a finite-step kernel without a divergence correction, a state-dependent `λ_φ` can shift the endpoint distribution even with an exact score. No claim in this repository relies on marginal preservation; any such claim needs its own measurement.
+
+The variance budget makes the nominal `λ` misleading above an edge's threshold `(1−ᾱ_t)/(1−ᾱ_t/ᾱ_s)`. On the default 20-NFE `leading` grid the threshold ranges from 1.003 (edge 50→0) to 2.55 (edge 350→300), so `λ = 1.5` is clipped on 2 of 19 stochastic edges and `λ = 2` on 8. Every result therefore records the requested and the effective multiplier.
+
+### Objective: `respaced_vlb` is a reference, not the test of adaptivity
+
+- Its KL terms favour `λ ≥ 1`: for a given mean the optimal variance is `β̃` plus the squared mean error, and in every control tested no edge preferred `λ < 1`. It does not reward a less stochastic sampler, so it cannot show a benefit that needs `λ < 1`.
+- On the default grid the last noisy edge 50→0 has `β̃ ≈ 1e-4` and dominates the bound, while its `λ` is clipped at 1.003. `diagnose` reports this per edge for the real score.
+- Capped coordinates receive exactly zero gradient.
+
+Training with it is possible and useful as a matched reference, and it stays available under `loss.kind = "respaced_vlb"`. An objective meant to demonstrate adaptive gains is added with `register_objective` in `loss.py`; the kernel does not change. Do not launch a long VLB run expecting it to answer the adaptivity question.
+
+## Layout
+
+| File | Contents |
+| --- | --- |
+| `sampling.py` | `Schedule`, timestep grids, `scaffold_transition`, `ddpm_transition`, the kernels and the single `sample` loop |
+| `backbone.py` | frozen denoiser (`load_frozen_score`, `FrozenEpsilon`); learned scaffolds (`MLPScaffold`, `UNetScaffold`); controls (`FixedScaffold`, `TimeOnlyScaffold`, `ShuffledStateScaffold`) |
+| `loss.py` | objective interface and registry, `RespacedVLB` with per-edge diagnostics |
+| `main.py` | `preflight`, `diagnose`, `train` and `evaluate` commands |
+| `metrics.py` | FID / IS (pinned InceptionV3), precision / recall (VGG-16 fc2, k = 3), optional classifier accuracy |
+| `utils.py` | config, paths, atomic I/O, hashing, seeding, CIFAR-100-LT data |
+| `config.json` | default experiment: MLP scaffold, 20 NFE |
+
+Two interfaces keep the pieces independent:
+
+- **Kernel** — `kernel(x_t, ε, t, s, labels) → Transition(mean, variance)`. `sample` draws from it and the loss scores it, so training and inference share one definition of the update.
+- **Scaffold** — `scaffold(x_t, time, labels) → λ`. Any module with this signature plugs into `ScaffoldKernel`; changing the architecture or the loss does not touch `sampling.py`.
+- **Objective** — `objective(epsilon_fn, kernel, x0, labels, generator=…) → (loss, details)`, built by `build_loss` from `loss.kind`. It reaches the sampler only through the kernel.
+
+Timestep convention: indices `0 … T−1` are noisy levels, `CLEAN = −1` is the data endpoint. A grid with `K+1` nodes costs exactly `K` evaluations of `θ`.
+
+## Configuration
+
+`config.json` describes one experiment. `paths`, `dataset`, `diffusion`, `model` fix the frozen problem; `sampler` (grid and CFG) is shared by training and evaluation; `scaffold`, `loss`, `training`, `validation` define a trained `φ`; `evaluation` defines a panel.
+
+A checkpoint's identity is everything except `evaluation`, so seeds, sample counts and arms can change without invalidating a trained scaffold. Any entry can be overridden on the command line:
 
 ```bash
-source .venv/bin/activate
-
-python -m scaffold.run plan \
-  --checkpoint runs/.../ddpm/seed_0/ckpt_300000.pt \
-  --name ddpm_seed0
-
-CUDA_VISIBLE_DEVICES=0 python -m scaffold.run all \
-  --checkpoint runs/.../ddpm/seed_0/ckpt_300000.pt \
-  --name ddpm_seed0
+--set sampler.grid.nfe=50
+--set sampler.grid='{"stride": 10}'        # vendor DDIM grid 990, 980, …, 0
+--set scaffold.inputs=time_class --set training.name=time_only_nfe20
 ```
 
-Đọc code theo thứ tự:
+Grids: `{"nfe": K, "spacing": "leading"}` evaluates at `0, T/K, …` and takes `x̂0` from index 0; `"trailing"` evaluates at `T−1, T−1−T/K, …`; `{"stride": n}` reproduces the vendor DDIM grid, which stops at index 0 without a clean edge.
 
-```text
-run.py       chọn stage, hiện rõ train -> sample -> evaluate
-train.py     load data và chỉ optimize phi
-sample.py    sinh cặp rho=1 / rho=rho_phi rồi evaluate
-core.py      ScalarScaffold và hai tích phân forward/reverse
-common.py    load config/checkpoint, I/O an toàn dưới outputs/
-```
+## Deployment
 
-Có thể chạy từng stage:
+Run from the repository root. Each step is a gate for the next: reproduce the baselines before judging the scaffold, and stop at the first failure.
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python -m scaffold.run train \
-  --checkpoint runs/.../ckpt_300000.pt --name ddpm_seed0
+# 0. Code-level checks (CPU; no checkpoint needed)
+python -m pytest tests_independent -q
+python -m pytest tests -q
 
-CUDA_VISIBLE_DEVICES=0 python -m scaffold.run sample \
-  --checkpoint runs/.../ckpt_300000.pt --name ddpm_seed0
+# 1. Checks against the pinned data, reference statistics and pretrained weights
+python -m pytest tests_independent --real-assets -q
+
+# 2. Gate D: one command, writes scaffold/outputs/preflight/preflight.json, exit code 1 on failure
+python -m scaffold.main preflight
+
+# 3. Where does the objective put its loss and its gradient, with the real score?
+python -m scaffold.main diagnose
+
+# 4. Fixed-lambda sweep and reference samplers (no training)
+python -m scaffold.main evaluate --arms ddim fixed_0.25 fixed_0.5 ddim_eta1 fixed_1.5 fixed_2.0 ddpm_fixedlarge
+
+# 5. Only after 2 passes and the objective is settled: learned scaffold and time-only control
+python -m scaffold.main train
+python -m scaffold.main train --set scaffold.inputs=time_class --set training.name=time_only_nfe20
+python -m scaffold.main evaluate
 ```
 
-Train tự resume từ `phi.pt`. Sample tạo hai condition bằng paired random noise.
+`train --resume` continues from `latest.pt` and refuses a changed config, score, data or kernel. `evaluate` always resumes, and a partial run (`--arms`) extends `summary.json` instead of replacing it. Independent training seeds are separate runs (`--set training.seed=… --set training.name=…`); evaluation seeds are `evaluation.seeds`.
 
-## Output
+### Preflight checks
 
-```text
-scaffold/outputs/ddpm_seed0/
-├── config.resolved.json
-├── phi.pt
-├── training.csv
-└── samples/
-    ├── labels.npy
-    ├── rho_1.npy
-    ├── rho_1.provenance.json
-    ├── learned.npy
-    └── learned.provenance.json
+| Check | Passes when |
+| --- | --- |
+| `score_checkpoint` | the checkpoint has the configured SHA-256 and loads strictly into the configured UNet |
+| `noise_schedule` | `ᾱ` equals the vendor sampler's buffer bit for bit |
+| `dataset_split` | class counts equal the long-tailed profile; pixels map to `[−1, 1]` |
+| `score_noise_prediction` | at four noise levels θ beats the trivial predictor and itself at a wrong timestep |
+| `ddim_parity` | `λ = 0` on the vendor grid matches the vendor DDIM sampler (max abs error < 5e-3) at CFG 0, the configured scale and 1.5 |
+| `ddpm_parity` | the last 200 ancestral steps match the vendor `fixedlarge` and `fixedsmall` chains with shared noise |
+| `metric_assets` | every reference file matches the manifest |
+| `inception_preprocessing` | our Inception pipeline on real CIFAR-100 images reproduces the stored reference features |
+| `baseline_panel` | DDIM, η=1 and DDPM arms sample and score to finite metrics (`--num-images`, default 1000) |
+
+Parity is checked only between equivalent solvers on the same grid. The baseline panel's numbers are recorded, not thresholded: 1000 images give a rough FID, useful for spotting a broken pipeline, not for comparing arms.
+
+### Outputs
+
+```
+scaffold/outputs/preflight/            preflight.json  panel/
+scaffold/outputs/<training.name>_diagnostics/   initial.json  update_<n>_<weights>.json
+scaffold/outputs/<training.name>/      config.json  reference_lambda1.json  train.jsonl  latest.pt  snapshot_<n>.pt  COMPLETE.train.json
+scaffold/outputs/<evaluation.name>/    PROTOCOL.json  summary.json
+    seed_<s>/<arm>/                    ARM.json  batches/  variance/  variance.json  samples.npy  metrics.json
 ```
 
-`outputs/` được tạo tự động khi chạy và bị Git ignore toàn bộ.
+- **Diagnostics** — one row per edge: `edge_kl_nats_per_dim`, `edge_gradient_norm`, `lambda_requested_mean`, `lambda_effective_mean`, `variance_clip_fraction`, `edge_weight`, `is_terminal`, the edge's `lambda_budget`, and the KL of the same states under fixed multipliers. The summary separates the full bound from the part that is trained and the part that has gradient, and names the dominant edge, zero-gradient edges and edges that prefer `λ < 1`.
+- **Training** — `train.jsonl` has one row per update; checkpoint rows add the bound on two fixed panels (long-tailed training images and held-out CIFAR-100 test images), overall and per group. `reference_lambda1.json` is the same bound for `λ = 1`. Checkpoints record the package version and source hashes.
+- **Evaluation** — `variance.json` gives, per edge, the requested and effective multiplier and the clipped fraction that the arm actually used. `summary.json` covers every scored cell on disk for the protocol: per-seed metrics, mean and standard deviation across seeds, and `paired_differences` against `evaluation.reference_arm` (DDIM) and against the best fixed-`λ` arm.
 
-## Evaluation chính thức
+### Reading the numbers
 
-Config mặc định là screening: 200 update và 10.000 sample mỗi condition. Không
-được dùng nó làm paper result. Để chạy evaluator canonical:
+- Paired differences are per evaluation seed (arms of a seed share all noise). The seed is the unit of replication; FID has no per-image difference. With three seeds the standard deviation is an indication, not a test.
+- The best fixed arm is selected on the reported seeds, so comparisons against it favour it; confirm on fresh seeds.
+- Recall is a global set-coverage statistic, not class coverage. Few-group FID at 5k samples (about 1700 images) is biased upwards and only comparable between arms of the same protocol.
+- `ClassAccuracy` appears only when `evaluation.classifier` names a TorchScript CIFAR-100 classifier (`torchscript`, `sha256`, `mean`, `std`). None ships with this repository; validate one separately before using it.
 
-1. đổi `sampling.num_images` thành `50000`;
-2. đổi `evaluation.enabled` thành `true`;
-3. chạy lại `all`, hoặc chạy riêng `evaluate` sau khi đã có 50k sample.
+### Evaluation arms
 
-```bash
-python -m scaffold.run evaluate \
-  --checkpoint runs/.../ckpt_300000.pt --name ddpm_seed0
-```
+| `kind` | Fields | Meaning |
+| --- | --- | --- |
+| `fixed` | `lambda` | constant multiplier (`0` = DDIM, `1` = η=1); the default config sweeps 0, 0.25, 0.5, 1, 1.5, 2 |
+| `ddpm` | `variance_type` | ancestral DDPM, `fixedsmall` or `fixedlarge` |
+| `learned` | `checkpoint`, `weights` (`ema`/`online`), `state` (`own`/`shuffled`) | trained scaffold; `shuffled` gives each sample the state of another sample of the same class |
 
-Metric và feature cache vẫn được ghi dưới `scaffold/outputs/<name>/metrics/`.
+All arms of a seed share labels, initial latents and Brownian draws. The shuffled-state arm needs at least two samples of every class per batch, which is why `evaluation.batch_size` is 200 for 100 classes. A learned arm whose checkpoint was trained on another grid or CFG is refused unless it sets `"allow_protocol_mismatch": true`; another score, schedule or kernel version is always refused. Changing the protocol requires a new `evaluation.name`.
 
-## Fixed A/A0 sweep
+## Verified properties
 
-Sweep `A/A0 = {0, 0.25, 0.5, 1, 2}` không train thêm parameter nào:
+- `λ = 0` reproduces the vendor DDIM sampler on its grid; `DDPMKernel` reproduces the vendor ancestral chain for `fixedlarge` and `fixedsmall` with shared noise (max abs error < 2e-4).
+- With an exact Gaussian score the endpoint variance of a fixed-`λ` sampler matches its closed-form finite-step value at 20 / 50 / 100 NFE, and the error shrinks monotonically with NFE.
+- Seeds are independent, runs are resumable bit-for-bit, and lost shards are regenerated identically.
 
-```bash
-CUDA_VISIBLE_DEVICES=0 python -m scaffold.run fixed-sweep \
-  --config scaffold/config.fixed_sweep.yaml \
-  --checkpoint /absolute/path/ckpt_300000.pt \
-  --name ddpm_300k_fixed_a_sweep
-```
+On that Gaussian control, at 20 NFE with `leading` spacing, the ratio of endpoint to data standard deviation for directions of data std 0.5 / 0.2 / 0.05 is 0.86 / 0.73 / 0.44 for `λ = 0` and 0.78 / 0.64 / 0.33 for `λ = 1`: within this family a larger `λ` contracts more. An improvement of a learned `λ` over DDIM on real data therefore has to come from correcting score error, not finite-step error.
 
-Năm condition dùng cùng labels và random-noise seed. Command có thể chạy lại:
-sample/metric hoàn tất được giữ nguyên. Bảng kết quả được ghi thành JSON, CSV và
-Markdown trong output. `Class-valid` được để `N/A` nếu chưa cung cấp một frozen
-CIFAR-100 classifier độc lập; requested conditioning label không được coi là
-bằng chứng ảnh đúng lớp.
+## Status of v1 (`1.0.0rc1`, kernel `ddim_scaffold_v1`)
 
-Fixed sweep dùng generalized DDIM cho cả năm dòng. Ở mỗi bước,
-`rho=A/A0` nhân trực tiếp DDIM posterior variance: `rho=0` khớp chính
-xác update DDIM/PF-ODE gốc, còn `rho=1` khôi phục DDPM posterior variance
-khi bước kề nhau. Với accelerated grid, đây là cùng một họ solver có
-kiểm soát stochasticity. Nếu `rho>1` vượt variance budget của một
-finite terminal step, variance được project về biên hợp lệ và provenance ghi
-rõ policy này.
+- **Verified on CPU with synthetic and stub models:** kernel and loss maths against independent numpy oracles, vendor parity, reproducibility, diagnostics, summary merging, paired statistics, preflight logic.
+- **Verified with real assets:** data split, noise schedule, metric assets and the Inception preprocessing.
+- **Not yet verified:** anything involving the pretrained score — `preflight` checks `score_checkpoint`, `score_noise_prediction`, `ddim_parity`, `ddpm_parity`, `baseline_panel`, and the four tests in `tests_independent/test_indep_pretrained.py`.
+- **Open:** an objective able to demonstrate adaptive gains; a validated CIFAR-100 classifier for class accuracy.
 
-Để chạy đồng thời năm condition trên cùng GPU, mở năm process `fixed-condition`
-với cùng config, checkpoint và `--name`; mỗi process nhận một trong các tên
-`pf_ode`, `reduced_025`, `reduced_05`, `standard_sde`, `increased_2`. Sau khi cả
-năm kết thúc, chạy `fixed-evaluate` một lần để evaluate tuần tự và ghép bảng.
-
-Command gọn hơn dưới đây tự xếp hàng tối đa hai condition cùng lúc (khoảng 10 GB
-trên H100 hiện tại), sau đó evaluate tối đa hai condition cùng lúc và ghép bảng
-tự động. Fixed sweep chỉ tính đúng các cột bảng cần dùng; KID, IS và PRD-Inception
-không được chạy thừa. FID, group FID và Recall giữ nguyên định nghĩa của chế độ
-`detailed`.
-
-```bash
-python -m scaffold.run fixed-parallel \
-  --parallel-workers 2 \
-  --config scaffold/config.fixed_sweep.yaml \
-  --checkpoint /absolute/path/ckpt_300000.pt \
-  --name ddpm_300k_fixed_a_sweep
-```
-
-## Numerical control và time-window gate
-
-`config.nfe_control.yaml` chạy sáu row còn thiếu cho grid 50/250 với
-`rho={0,0.5,1}`. Ba row grid-100 được tái sử dụng từ fixed sweep,
-không sinh lại:
-
-```bash
-python -m scaffold.run fixed-parallel --parallel-workers 2 \
-  --config scaffold/config.nfe_control.yaml \
-  --checkpoint /absolute/path/ckpt_300000.pt \
-  --name ddpm_300k_nfe_control
-```
-
-Chỉ khi NFE control vẫn cho thấy global stochasticity xấu hơn PF-ODE,
-`config.time_windows_rho05.yaml` screen bốn quarter-time window tại `rho=0.5`.
-Ngoài window, sampler đặt `rho=0` chính xác. Condition tùy chỉnh nằm
-trong `experiment.conditions`; không cần thêm script hoặc hard-code tên condition.
-
-## Tiêu chí đọc kết quả
-
-- Primary: Few-class FID của `learned` tốt hơn `rho_1` trên paired seeds.
-- Secondary: FID/KID tổng và Many/Medium FID không suy giảm lớn.
-- Anti-metric: training loss thấp không tự nó chứng minh generation tốt hơn.
-- Tối thiểu 3 score seeds trước khi đưa ra kết luận.
-
-## Kiểm thử
-
-```bash
-python -m pytest -q scaffold/test_scaffold.py
-```
-
-Test kiểm tra `rho=1` lúc khởi tạo, theta thật sự frozen, gradient vẫn tới phi,
-paired sampling deterministic và output không thể thoát khỏi `scaffold/outputs`.
+The earlier Euler–Maruyama ELBO pipeline was removed; its sources are archived in `scaffold/outputs/legacy_source_20261011.tar.gz`.

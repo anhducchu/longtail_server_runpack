@@ -1,0 +1,7 @@
+# Install torch and torchvision for your CUDA version first.
+numpy
+# Tests (the vendor sampler used as parity reference imports these)
+pytest
+tqdm
+einops
+info-nce-pytorch

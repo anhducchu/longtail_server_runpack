@@ -1,0 +1,148 @@
+{
+  "config_version": "scaffold-v1",
+  "paths": {
+    "checkpoint": "runs/ccua_cifar100_if100_ddpm_cbdm_seed0_v1/c100_if100_baselines/ddpm/seed_0/ckpt_300000.pt",
+    "checkpoint_sha256": "dc3be0c5ee5d27a61a1c5d78737a26ddca758dfeda47ed5c7e63a54715eef6b3"
+  },
+  "dataset": {
+    "root": "data",
+    "imbalance_factor": 0.01,
+    "split_seed": 0,
+    "num_classes": 100,
+    "image_size": 32
+  },
+  "diffusion": {
+    "steps": 1000,
+    "beta_1": 0.0001,
+    "beta_T": 0.02
+  },
+  "model": {
+    "checkpoint_key": "ema_model",
+    "channels": 128,
+    "channel_multipliers": [
+      1,
+      2,
+      2,
+      2
+    ],
+    "attention_levels": [
+      1
+    ],
+    "residual_blocks": 2,
+    "dropout": 0.1,
+    "microbatch": 16
+  },
+  "sampler": {
+    "grid": {
+      "nfe": 20,
+      "spacing": "leading"
+    },
+    "guidance_scale": 0.0
+  },
+  "scaffold": {
+    "kind": "mlp",
+    "inputs": "state_time_class",
+    "image_size": 32,
+    "hidden_dims": [
+      128,
+      128
+    ],
+    "condition_dim": 128,
+    "variance_floor": 0.0001,
+    "variance_initial": 1.0
+  },
+  "loss": {
+    "kind": "respaced_vlb"
+  },
+  "training": {
+    "name": "learned_nfe20",
+    "seed": 20261011,
+    "classes_per_batch": 4,
+    "samples_per_class": 8,
+    "updates": 5000,
+    "learning_rate": 0.0003,
+    "weight_decay": 0.01,
+    "gradient_clip": 1.0,
+    "horizontal_flip": true,
+    "ema_decay": 0.999,
+    "checkpoint_interval": 500,
+    "log_interval": 10,
+    "retain_snapshots": true
+  },
+  "validation": {
+    "per_class": 8,
+    "seed": 730021,
+    "batch_size": 32,
+    "heldout": true
+  },
+  "evaluation": {
+    "name": "panel_nfe20",
+    "num_images": 5000,
+    "batch_size": 200,
+    "seeds": [
+      0,
+      1,
+      2
+    ],
+    "metrics_root": "third_party/CCUA-DDPM/stats",
+    "inception_batch_size": 64,
+    "vgg_batch_size": 128,
+    "recall": true,
+    "reference_arm": "ddim",
+    "selection_metric": "FID.Overall",
+    "classifier": null,
+    "arms": [
+      {
+        "name": "ddim",
+        "kind": "fixed",
+        "lambda": 0.0
+      },
+      {
+        "name": "ddim_eta1",
+        "kind": "fixed",
+        "lambda": 1.0
+      },
+      {
+        "name": "ddpm_fixedlarge",
+        "kind": "ddpm",
+        "variance_type": "fixedlarge"
+      },
+      {
+        "name": "fixed_0.25",
+        "kind": "fixed",
+        "lambda": 0.25
+      },
+      {
+        "name": "fixed_0.5",
+        "kind": "fixed",
+        "lambda": 0.5
+      },
+      {
+        "name": "fixed_1.5",
+        "kind": "fixed",
+        "lambda": 1.5
+      },
+      {
+        "name": "fixed_2.0",
+        "kind": "fixed",
+        "lambda": 2.0
+      },
+      {
+        "name": "time_only",
+        "kind": "learned",
+        "checkpoint": "scaffold/outputs/time_only_nfe20/latest.pt"
+      },
+      {
+        "name": "learned",
+        "kind": "learned",
+        "checkpoint": "scaffold/outputs/learned_nfe20/latest.pt"
+      },
+      {
+        "name": "learned_shuffled",
+        "kind": "learned",
+        "checkpoint": "scaffold/outputs/learned_nfe20/latest.pt",
+        "state": "shuffled"
+      }
+    ]
+  }
+}
