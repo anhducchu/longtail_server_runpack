@@ -58,7 +58,8 @@ def row(summary: dict, arm: str, grid_name: str, grid: dict, steps: int) -> dict
             'score_evaluations_per_image': evaluations, 'model_forwards_per_image': 2 * evaluations,
             'seeds': stats['FID.Overall']['seeds'],
             **{key: {'mean': stats[key]['mean'], 'std': stats[key]['std']}
-               for key in ('FID.Overall', 'FID.Many', 'FID.Medium', 'FID.Few', 'IS.Overall.mean', 'Precision', 'Recall')}}
+               for key in ('FID.Overall', 'FID.Many', 'FID.Medium', 'FID.Few', 'IS.Overall.mean', 'Precision', 'Recall')
+               if key in stats}}
 
 
 def main() -> None:
